@@ -71,13 +71,13 @@ static struct rt5651_init_reg init_list[] = {
 	/* LOUT */
 	{RT5651_LOUT_MIXER	, 0xc000},
 	{RT5651_LOUT_CTRL1	, 0x8a8a},
-	{RT5651_LOUT_CTRL2	, 0x8000}, /* Set LOUT to diff. mode */
+	//{RT5651_LOUT_CTRL2	, 0x8000}, /* Set LOUT to diff. mode */
 	/* MIC */
 	{RT5651_STO1_ADC_MIXER	, 0x3020},
 	/* {RT5651_STO1_ADC_MIXER	, 0x5042}, */ /* DMICS */
-
-	{RT5651_IN1_IN2		, 0x1000}, /* set IN1 boost 20db */
-	{RT5651_IN3		, 0x1000}, /* set IN3 boost to 20db */
+//	{RT5651_IN1_IN2		, 0x1000}, /* set IN1 boost 20db */
+	{RT5651_IN1_IN2		, 0x140}, 
+//	{RT5651_IN3		, 0x1000}, /* set IN3 boost to 20db */
 	/* {RT5651_GPIO_CTRL1	, 0xc000}, */ /* enable gpio1, DMIC1 */
 	/* I2S2 */
 	/* {RT5651_GPIO_CTRL1	, 0x0000}, */ /* I2S-2 Pin -> I2S */
@@ -85,6 +85,15 @@ static struct rt5651_init_reg init_list[] = {
 	/* {RT5651_DAC2_CTRL	, 0x0c00}, */
 
 	{RT5651_DIG_INF_DATA    , 0x0080},
+//settings taken from stock android
+	{RT5651_A_JD_CTL1 , 0x0212},
+	{RT5651_EQ_CTRL1 , 0xa080},
+	{RT5651_ALC_1 , 0x2226},
+	{RT5651_ALC_2 , 0x1fe8},
+	{RT5651_ALC_3 , 0x0100},
+	{RT5651_IRQ_CTRL1 ,  0x0200},
+	{RT5651_GPIO_CTRL1 , 0x8000},
+	{RT5651_GPIO_CTRL2 , 0x0004},
 };
 
 #define RT5651_INIT_REG_LEN ARRAY_SIZE(init_list)
@@ -2218,13 +2227,14 @@ static int rt5651_set_bias_level(struct snd_soc_codec *codec,
 
 	case SND_SOC_BIAS_OFF:
 		set_sys_clk(codec, RT5651_SCLK_S_RCCLK);
-		snd_soc_write(codec, RT5651_D_MISC, 0x0010);
+		//snd_soc_write(codec, RT5651_D_MISC, 0x0010);
 		snd_soc_write(codec, RT5651_PWR_DIG1, 0x0000);
 		snd_soc_write(codec, RT5651_PWR_DIG2, 0x0000);
 		snd_soc_write(codec, RT5651_PWR_VOL, 0x0000);
 		snd_soc_write(codec, RT5651_PWR_MIXER, 0x0000);
-		snd_soc_write(codec, RT5651_PWR_ANLG1, 0x0000);
-		snd_soc_write(codec, RT5651_PWR_ANLG2, 0x0000);
+//this would turn off headphone detection on chuwi hibook
+		//snd_soc_write(codec, RT5651_PWR_ANLG1, 0x0000);
+		//snd_soc_write(codec, RT5651_PWR_ANLG2, 0x0000);
 		break;
 
 	default:
@@ -2252,6 +2262,7 @@ static int rt5651_probe(struct snd_soc_codec *codec)
 	struct rt56xx_ops *ioctl_ops = rt56xx_get_ioctl_ops();
 #endif
 #endif
+
 	ret = snd_soc_codec_set_cache_io(codec, 8, 16, SND_SOC_I2C);
 	if (ret != 0) {
 		dev_err(codec->dev, "Failed to set cache I/O: %d\n", ret);
@@ -2413,6 +2424,7 @@ static struct snd_soc_codec_driver soc_codec_dev_rt5651 = {
 static const struct i2c_device_id rt5651_i2c_id[] = {
 	{"rt5651", 0},
 	{"10EC5651:00", 0},
+	{"10EC5651:01", 0},
 	{"10EC5651", 0},
 	{"i2c-10EC5651:00:1c"},
 	{}

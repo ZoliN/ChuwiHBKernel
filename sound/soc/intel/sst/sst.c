@@ -627,7 +627,7 @@ static struct platform_device cht_cr_mrd_mach_dev = {
 	.num_resources  = 0,
 };
 static struct platform_device cht_cr_mach_dev = {
-	.name           = "cht_aic31xx",
+	.name           = "byt_rt5651",
 	.id             = -1,
 	.num_resources  = 0,
 };
@@ -744,6 +744,7 @@ static int intel_sst_probe(struct pci_dev *pci,
 	u32 dma_base_add;
 	u32 len;
 
+  printk("intel_sst_probe enter zzzz\n");
 	/* Detect and setup board-configuration */
 	set_mc_link();
 

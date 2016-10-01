@@ -20,6 +20,8 @@
  * ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
  */
 
+#define DEBUG
+
 #include <linux/init.h>
 #include <linux/module.h>
 #include <linux/platform_device.h>
@@ -32,6 +34,7 @@
 #include <linux/mfd/intel_soc_pmic.h>
 #include <asm/intel-mid.h>
 #include <asm/platform_byt_audio.h>
+#include <asm/platform_cht_audio.h>
 #include <sound/pcm.h>
 #include <sound/pcm_params.h>
 #include <sound/soc.h>
@@ -40,7 +43,7 @@
 
 #include "byt_cr_board_configs.h"
 
-#define BYT_PLAT_CLK_3_HZ	25000000
+#define BYT_PLAT_CLK_3_HZ	19200000
 
 #define BYT_JD_INTR_DEBOUNCE            0
 
@@ -202,11 +205,11 @@ static inline bool byt_hs_inserted(struct byt_drvdata *drvdata)
 	val = (bool)gpiod_get_value(desc);
 
 	/* TEMP for MRD7 until active_low is working properly with ACPI */
-	if (drvdata->gpios.jd_int2_gpio == RT5651_GPIO_NA)
-		val = !val;
+	//if (drvdata->gpios.jd_int2_gpio == RT5651_GPIO_NA)
+	val = !val;
 
 	pr_info("%s: val = %d (pin = %d, active_low = %d)\n", __func__, val,
-		drvdata->gpios.jd_int_gpio, gpiod_is_active_low(desc));
+		drvdata->gpios.jd_int2_gpio, gpiod_is_active_low(desc));
 
 	return val;
 }
@@ -308,7 +311,7 @@ static void byt_hs_jack_recheck(struct work_struct *work)
 static struct snd_soc_jack_gpio hs_gpio[] = {
 	{
 		.name                   = "byt-jd-int",
-		.report                 = SND_JACK_HEADSET,
+		.report                 = SND_JACK_HEADSET|SND_JACK_HEADPHONE,
 		.debounce_time          = BYT_JD_INTR_DEBOUNCE,
 		.jack_status_check      = byt_jack_interrupt,
 	},
@@ -327,7 +330,7 @@ static inline struct snd_soc_codec *byt_get_codec(struct snd_soc_card *card)
 	struct snd_soc_codec *codec;
 
 	list_for_each_entry(codec, &card->codec_dev_list, card_list) {
-		if (!strstr(codec->name, "i2c-10EC5651:00"))
+		if (!strstr(codec->name, "i2c-10EC5651:01"))
 			continue;
 		else {
 			found = true;
@@ -359,13 +362,13 @@ static int byt_set_alc105(struct snd_soc_dapm_widget *w,
 		return -EIO;
 	}
 
-	desc = gpio_to_desc(drvdata->gpios.alc105_reset_gpio);
+	desc = gpio_to_desc(drvdata->gpios.jd_int_gpio/*alc105_reset_gpio*/);
 	if (SND_SOC_DAPM_EVENT_ON(event)) {
 		pr_debug("%s: ALC105 ON.\n", __func__);
-		gpiod_set_value(desc, 0);
+		gpiod_set_value(desc, 1);
 	} else {
 		pr_debug("%s: ALC105 OFF.\n", __func__);
-		gpiod_set_value(desc, 1);
+		gpiod_set_value(desc, 0);
 	}
 
 	return 0;
@@ -392,13 +395,16 @@ static int byt_set_platform_clock(struct snd_soc_dapm_widget *w,
 
 		pr_debug("%s: Platform clk turned ON\n", __func__);
 		snd_soc_write(codec, RT5651_ADDA_CLK1, 0x0014);
+		snd_soc_codec_set_sysclk(codec, RT5651_SCLK_S_PLL1,
+				0, BYT_PLAT_CLK_3_HZ, SND_SOC_CLOCK_IN);
 	} else {
 		/* Set codec clock source to internal clock before
 		   turning off the platform clock. Codec needs clock
 		   for Jack detection and button press */
-		snd_soc_write(codec, RT5651_ADDA_CLK1, 0x7774);
-		/* snd_soc_codec_set_sysclk(codec, RT5651_SCLK_S_RCCLK,
-				0, 0, SND_SOC_CLOCK_IN); */
+//		snd_soc_write(codec, RT5651_ADDA_CLK1, 0x7774);
+		snd_soc_write(codec, RT5651_ADDA_CLK1, 0x1114);
+		 snd_soc_codec_set_sysclk(codec, RT5651_SCLK_S_RCCLK,
+				0, 0, SND_SOC_CLOCK_IN); 
 		vlv2_plat_configure_clock(VLV2_PLAT_CLK_AUDIO,
 				PLAT_CLK_FORCE_OFF);
 
@@ -419,6 +425,7 @@ static const struct snd_soc_dapm_widget byt_dapm_widgets[] = {
 };
 
 static const struct snd_soc_dapm_route byt_audio_map[] = {
+
 	/* Playback */
 
 	{"Ext Spk", NULL, "Platform Clock"},
@@ -574,6 +581,9 @@ static int byt_init(struct snd_soc_pcm_runtime *runtime)
 	rt5651_config_ovcd_thld(codec, RT5651_MIC1_OVTH_2000UA,
 			RT5651_MIC_OVCD_SF_0P5);
 
+	snd_soc_update_bits(codec, RT5651_PWR_ANLG2,
+		RT5651_PWR_JD_M, RT5651_PWR_JD_M);
+
 	mutex_init(&drvdata->jack_mlock);
 
 
@@ -692,7 +702,7 @@ static int byt_init(struct snd_soc_pcm_runtime *runtime)
 		WARN(1, "Wrong ACPI configuration !");
 	} else {
 		ret = snd_soc_jack_new(codec, "BYT-CR Audio Jack",
-				SND_JACK_HEADSET | SND_JACK_BTN_0,
+				SND_JACK_HEADSET | SND_JACK_HEADPHONE | SND_JACK_BTN_0,
 				 &drvdata->jack);
 		if (ret) {
 			pr_err("%s: snd_soc_jack_new failed (ret = %d)!\n",
@@ -776,8 +786,18 @@ static struct snd_soc_ops byt_8k_16k_ops = {
 	.hw_params = byt_aif1_hw_params,
 };
 
+static int cht_compr_set_params(struct snd_compr_stream *cstream)
+{
+	return 0;
+}
+
+static struct snd_soc_compr_ops cht_compr_ops = {
+	.set_params = cht_compr_set_params,
+};
+
+
 static struct snd_soc_dai_link byt_dailink[] = {
-	[BYT_DPCM_AUDIO] = {
+	[CHT_DPCM_AUDIO] = {
 		.name = "Baytrail Audio Port",
 		.stream_name = "Baytrail Audio",
 		.cpu_dai_name = "Headset-cpu-dai",
@@ -789,7 +809,31 @@ static struct snd_soc_dai_link byt_dailink[] = {
 		.dynamic = 1,
 		.ops = &byt_aif1_ops,
 	},
-	[BYT_DPCM_VOIP] = {
+	[CHT_DPCM_DB] = {
+		.name = "Cherrytrail DB Audio Port",
+		.stream_name = "Deep Buffer Audio",
+		.cpu_dai_name = "Deepbuffer-cpu-dai",
+		.codec_dai_name = "snd-soc-dummy-dai",
+		.codec_name = "snd-soc-dummy",
+		.platform_name = "sst-platform",
+		.ignore_suspend = 1,
+		.dynamic = 1,
+		.ops = &byt_aif1_ops,
+		.dpcm_playback = 1,
+	},
+	[CHT_DPCM_COMPR] = {
+		.name = "Cherrytrail Compressed Port",
+		.stream_name = "Cherrytrail Compress",
+		.cpu_dai_name = "Compress-cpu-dai",
+		.codec_dai_name = "snd-soc-dummy-dai",
+		.codec_name = "snd-soc-dummy",
+		.platform_name = "sst-platform",
+		.ignore_suspend = 1,
+		.dynamic = 1,
+		.compr_ops = &cht_compr_ops,
+		.dpcm_playback = 1,
+	},
+	[CHT_DPCM_VOIP] = {
 		.name = "Baytrail VOIP Port",
 		.stream_name = "Baytrail Voip",
 		.cpu_dai_name = "Voip-cpu-dai",
@@ -801,7 +845,27 @@ static struct snd_soc_dai_link byt_dailink[] = {
 		.ops = &byt_8k_16k_ops,
 		.dynamic = 1,
 	},
-
+	[CHT_DPCM_LL] = {
+		.name = "Cherrytrail LL Audio Port",
+		.stream_name = "Low Latency Audio",
+		.cpu_dai_name = "Lowlatency-cpu-dai",
+		.codec_name = "snd-soc-dummy",
+		.codec_dai_name = "snd-soc-dummy-dai",
+		.platform_name = "sst-platform",
+		.ignore_suspend = 1,
+		.dynamic = 1,
+		.ops = &byt_aif1_ops,
+	},	
+	[CHT_DPCM_PROBE] = {
+		.name = "Cherrytrail Probe Port",
+		.stream_name = "Cherrytrail Probe",
+		.cpu_dai_name = "Probe-cpu-dai",
+		.platform_name = "sst-platform",
+		.codec_dai_name = "snd-soc-dummy-dai",
+		.codec_name = "snd-soc-dummy",
+		.playback_count = 8,
+		.capture_count = 8,
+	},
 	/* CODEC<->CODEC link */
 	{
 		.name = "Baytrail BTFM-Loop Port",
@@ -822,7 +886,7 @@ static struct snd_soc_dai_link byt_dailink[] = {
 		.platform_name = "sst-platform",
 		.no_pcm = 1,
 		.codec_dai_name = "rt5651-aif1",
-		.codec_name = "i2c-10EC5651:00",
+		.codec_name = "i2c-10EC5651:01",
 		.ignore_suspend = 1,
 		.ops = &byt_be_ssp2_ops,
 	},
@@ -867,7 +931,7 @@ static int snd_byt_poweroff(struct device *dev)
 
 /* SoC card */
 static struct snd_soc_card snd_soc_card_byt_default = {
-	.name = "bytcr-rt5651",
+	.name = "cherrytrailaud",
 	.dai_link = byt_dailink,
 	.num_links = ARRAY_SIZE(byt_dailink),
 	.set_bias_level = byt_set_bias_level,
