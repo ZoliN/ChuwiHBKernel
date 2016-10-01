@@ -118,6 +118,18 @@ int acpi_bus_get_status(struct acpi_device *device)
 	if (ACPI_FAILURE(status))
 		return -ENODEV;
 
+	if (!strcmp(dev_name(&device->dev),"BOSC0200:00") ) {
+		sta=0xf;
+		printk("Forcing BOSC0200 status to 0xf.");
+	} else if (!strcmp(dev_name(&device->dev),"MSSL0017:00") ) {
+		sta=0xf;
+		printk("Forcing MSSL0017 status to 0xf.");
+	} else if (!strcmp(dev_name(&device->dev),"CPLM3218:00") ) {
+		sta=0xf;
+		printk("Forcing CPLM3218:00 status to 0xf.");
+	}
+
+	
 	acpi_set_device_status(device, sta);
 
 	if (device->status.functional && !device->status.present) {
