@@ -54,6 +54,9 @@ struct inv_mpu6050_reg_map {
 	u8 int_enable;
 	u8 pwr_mgmt_1;
 	u8 pwr_mgmt_2;
+	u8 int_pin_cfg;
+	u8 who_am_i;
+	u8 accl_off;
 };
 
 /*device enum */
@@ -71,6 +74,7 @@ enum inv_devices {
  *  @accl_fifo_enable:	enable accel data output
  *  @gyro_fifo_enable:	enable gyro data output
  *  @fifo_rate:		FIFO update rate.
+ *  @int_pin_cfg:	Default interrupt pin config
  */
 struct inv_mpu6050_chip_config {
 	unsigned int fsr:2;
@@ -80,6 +84,7 @@ struct inv_mpu6050_chip_config {
 	unsigned int accl_fifo_enable:1;
 	unsigned int gyro_fifo_enable:1;
 	u16 fifo_rate;
+	u8 int_pin_cfg;
 };
 
 /**
@@ -118,8 +123,12 @@ struct inv_mpu6050_state {
 	enum   inv_devices chip_type;
 	spinlock_t time_stamp_lock;
 	struct i2c_client *client;
+	struct i2c_adapter *mux_adapter;
+	struct i2c_client *mux_client;
+	unsigned int powerup_count;
 	struct inv_mpu6050_platform_data plat_data;
 	DECLARE_KFIFO(timestamps, long long, TIMESTAMP_FIFO_SIZE);
+	struct gpio_desc *gpiod;
 };
 
 /*register and associated bit definition*/
@@ -159,6 +168,8 @@ struct inv_mpu6050_state {
 #define INV_MPU6050_REG_FIFO_COUNT_H        0x72
 #define INV_MPU6050_REG_FIFO_R_W            0x74
 
+#define INV_MPU6050_REG_ACCEL_OFFSET	    0x06
+
 #define INV_MPU6050_BYTES_PER_3AXIS_SENSOR   6
 #define INV_MPU6050_FIFO_COUNT_BYTE          2
 #define INV_MPU6050_FIFO_THRESHOLD           500
@@ -184,6 +195,19 @@ struct inv_mpu6050_state {
 #define INV_MPU6050_MAX_FIFO_RATE                         1000
 #define INV_MPU6050_MIN_FIFO_RATE                         4
 #define INV_MPU6050_ONE_K_HZ                              1000
+
+#define INV_MPU6050_REG_INT_PIN_CFG		0x37
+#define INV_MPU6050_BIT_ACTL_LOW		0x80
+#define INV_MPU6050_BIT_OPEN_DRAIN		0x40
+#define INV_MPU6050_BIT_INT_LATCH_EN		0x20
+#define INV_MPU6050_BIT_INT_ANYRD_2CLEAR	0x10
+#define INV_MPU6050_BIT_ACTL_FSYNC_LOW		0x08
+#define INV_MPU6050_BIT_FSYNC_INT_MODE_EN	0x04
+#define INV_MPU6050_BIT_BYPASS_EN		0x02
+
+#define INV_MPU6050_REG_WHOAMI			0x75
+#define INV_MPU6500_UNIQUE_ID			0x70
+#define INV_MPU6050_UNIQUE_ID			0x68
 
 /* scan element definition */
 enum inv_mpu6050_scan {
@@ -239,8 +263,10 @@ enum inv_mpu6050_clock_sel_e {
 irqreturn_t inv_mpu6050_irq_handler(int irq, void *p);
 irqreturn_t inv_mpu6050_read_fifo(int irq, void *p);
 int inv_mpu6050_probe_trigger(struct iio_dev *indio_dev);
-void inv_mpu6050_remove_trigger(struct inv_mpu6050_state *st);
+void inv_mpu6050_remove_trigger(struct iio_dev *indio_dev);
 int inv_reset_fifo(struct iio_dev *indio_dev);
 int inv_mpu6050_switch_engine(struct inv_mpu6050_state *st, bool en, u32 mask);
 int inv_mpu6050_write_reg(struct inv_mpu6050_state *st, int reg, u8 val);
 int inv_mpu6050_set_power_itg(struct inv_mpu6050_state *st, bool power_on);
+int inv_mpu_acpi_create_mux_client(struct inv_mpu6050_state *st);
+void inv_mpu_acpi_delete_mux_client(struct inv_mpu6050_state *st);

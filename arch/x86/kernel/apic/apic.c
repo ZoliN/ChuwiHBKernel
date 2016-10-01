@@ -283,8 +283,12 @@ u32 native_safe_apic_wait_icr_idle(void)
 
 void native_apic_icr_write(u32 low, u32 id)
 {
+	unsigned long flags;
+
+	local_irq_save(flags);
 	apic_write(APIC_ICR2, SET_APIC_DEST_FIELD(id));
 	apic_write(APIC_ICR, low);
+	local_irq_restore(flags);
 }
 
 u64 native_apic_icr_read(void)
@@ -2433,9 +2437,11 @@ static void apic_pm_activate(void)
 
 static int __init init_lapic_sysfs(void)
 {
+#if 0
 	/* XXX: remove suspend/resume procs if !apic_pm_state.active? */
 	if (cpu_has_apic)
 		register_syscore_ops(&lapic_syscore_ops);
+#endif
 
 	return 0;
 }

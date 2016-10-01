@@ -207,20 +207,36 @@ config X86_PKG_TEMP_THERMAL
 	  two trip points which can be set by user to get notifications via thermal
 	  notification methods.
 
-config ACPI_INT3403_THERMAL
-	tristate "ACPI INT3403 thermal driver"
+config INTEL_THERMAL
+	tristate "Intel Thermal driver"
 	depends on X86 && ACPI
+	select THERMAL_GOV_USER_SPACE
 	help
-	  Newer laptops and tablets that use ACPI may have thermal sensors
-	  outside the core CPU/SOC for thermal safety reasons. These
-	  temperature sensors are also exposed for the OS to use via the so
-	  called INT3403 ACPI object. This driver will, on devices that have
-	  such sensors, expose the temperature information from these sensors
-	  to userspace via the normal thermal framework. This means that a wide
-	  range of applications and GUI widgets can show this information to
-	  the user or use this information for making decisions. For example,
-	  the Intel Thermal Daemon can use this information to allow the user
-	  to select his laptop to run without turning on the fans.
+	  Newer laptops and tablets that use ACPI for thermal control
+	  outside the core CPU/SOC for thermal safety reasons.
+	  They are exposed for the OS to use via an INT3400 ACPI device object
+	  as the master, and INT3401~INT340B ACPI device objects as the slaves.
+
+config INTEL_PMIC_THERMAL
+	tristate "PMIC thermal driver"
+	depends on X86 && INTEL_SOC_PMIC
+	help
+	  Select this if the PMIC controls the ADC channels for system temperature
+	  measurements and alerts.
+
+config INTEL_SOC_DTS_THERMAL
+	tristate "Intel SoCs DTS thermal driver"
+	depends on X86
+	select IOSF_MBI
+	help
+	  Enable this to register Intel SoCs (e.g. Bay Trail) platform digital
+	  temperature sensor (DTS). These SoCs have two additional DTSs in
+	  addition to DTSs on CPU cores. Each DTS will be registered as a
+	  thermal zone. There are two trip points. One of the trip point can
+	  be set by user mode programs to get notifications via Linux thermal
+	  notification methods.The other trip is a critical trip point, which
+	  was set by the driver based on the TJ MAX temperature.
+
 
 menu "Texas Instruments thermal drivers"
 source "drivers/thermal/ti-soc-thermal/Kconfig"

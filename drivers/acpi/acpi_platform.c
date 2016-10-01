@@ -31,11 +31,44 @@ static const struct acpi_device_id acpi_platform_device_ids[] = {
 	{ "PNP0D40" },
 	{ "VPC2004" },
 	{ "BCM4752" },
+	{ "LNV4752" },
+	{ "BCM2E1A" },
+	{ "INT33E1" },
+	{ "INTL1216" },
+	{ "BCM2E39" },
+	{ "BCM2E3D" },
+	{ "BCM2E3A" },
+	{ "RTL8723" },
+	{ "OBDA8723" },
+	{ "BCM4752E" },
+	{ "BCM43241" },
+	{ "BCM4356" },
+	{ "INT5502"  },
+	{ "INT8260"  },
+	{ "BCM47521" },
+	/* Modem Controller Device */
+	{ "MCD0001", 0 },
 
 	/* Intel Smart Sound Technology */
 	{ "INT33C8" },
-	{ "80860F28" },
+	{ "INT3438" },
+	{ "LPE0F28", 0 },
+	{ "80860F28", 0 },
+	{ "LPE0F281", 0 },
+	{ "10TI3100", 0 },
+	{ "TIMC0F28", 0 },
+	{ "DMA0F28", 0 },
+	{ "ADMA0F28", 0 },
+	{ "808622A8", 0 },
+	{ "VIBR22A8", 0 },
+	{ "ADMA0F28", 0 },
 
+	{ "INT0002", 0 },
+	{ "HSP0001", 0 },
+	{ "SSP0001", 0 },
+
+	{ "INT33A2" },
+	{ "INTA4322" },
 	{ }
 };
 
@@ -124,6 +157,7 @@ int acpi_create_platform_device(struct acpi_device *adev,
 	kfree(resources);
 	return 1;
 }
+EXPORT_SYMBOL_GPL(acpi_create_platform_device);
 
 static struct acpi_scan_handler platform_handler = {
 	.ids = acpi_platform_device_ids,

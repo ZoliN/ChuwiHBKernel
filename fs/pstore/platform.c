@@ -49,6 +49,10 @@ MODULE_PARM_DESC(update_ms, "milliseconds before pstore updates its content "
 		 "enabling this option is not safe, it may lead to further "
 		 "corruption on Oopses)");
 
+static ulong pstore_extra_size = 1024;
+module_param_named(extra_size, pstore_extra_size, ulong, 0600);
+MODULE_PARM_DESC(extra_size, "maximum of dumped extra data (beside kmsg)");
+
 static int pstore_new_entry;
 
 static void pstore_timefunc(unsigned long);
@@ -57,11 +61,15 @@ static DEFINE_TIMER(pstore_timer, pstore_timefunc, 0, 0);
 static void pstore_dowork(struct work_struct *);
 static DECLARE_WORK(pstore_work, pstore_dowork);
 
+static LIST_HEAD(pstore_extra_dumper_list);
+
 /*
  * pstore_lock just protects "psinfo" during
  * calls to pstore_register()
  */
 static DEFINE_SPINLOCK(pstore_lock);
+static DEFINE_SPINLOCK(pstore_extra_dumper_lock);
+static size_t pstore_extra_written;
 struct pstore_info *psinfo;
 
 static char *backend;
@@ -76,7 +84,7 @@ static char *big_oops_buf;
 static size_t big_oops_buf_sz;
 
 /* How much of the console log to snapshot */
-static unsigned long kmsg_bytes = 10240;
+static unsigned long kmsg_bytes = 4096;
 
 void pstore_set_kmsg_bytes(int bytes)
 {
@@ -278,6 +286,19 @@ static void pstore_dump(struct kmsg_dumper *dumper,
 	unsigned long	flags = 0;
 	int		is_locked = 0;
 	int		ret;
+	unsigned long	flags_extra;
+	struct pstore_extra_dumper *extra_dumper;
+
+	/* Don't use pstore space for non-fatal events */
+	if (reason != KMSG_DUMP_PANIC && reason != KMSG_DUMP_EMERG)
+		return;
+
+	/*
+	 * Only dump the first instance of an event, ignore nested
+	 * crashes and similar.
+	 */
+	if (oopscount > 0)
+		return;
 
 	why = get_reason_str(reason);
 
@@ -342,6 +363,48 @@ static void pstore_dump(struct kmsg_dumper *dumper,
 		total += total_len;
 		part++;
 	}
+
+	/* call each registered extra dumper after kmsg */
+	part = 1;
+
+	/* skip extra dumping if we cannot acquire the lock when a panic
+	 * happens. Otherwise we could be at a deadlock situation.
+	 */
+	if (spin_trylock_irqsave(&pstore_extra_dumper_lock, flags_extra)) {
+
+		list_for_each_entry(extra_dumper, &pstore_extra_dumper_list, list)
+		{
+			while (pstore_extra_written < pstore_extra_size) {
+				size_t read;
+				size_t len = min(psinfo->bufsize,
+						pstore_extra_size - pstore_extra_written);
+
+				ret = extra_dumper->get_data(psinfo->buf, len, &read,
+						extra_dumper->priv);
+
+				if (ret < 0 || !read)
+					break;
+
+				if (unlikely(read > len))
+					read = len;
+
+				ret = psinfo->write(PSTORE_TYPE_EXTRA, reason, &id, part,
+						oopscount, false, read, psinfo);
+
+				if (ret < 0)
+					goto extra_done;
+
+				pstore_extra_written += read;
+
+				part++;
+			}
+		}
+
+extra_done:
+
+		spin_unlock_irqrestore(&pstore_extra_dumper_lock, flags_extra);
+	}
+
 	if (pstore_cannot_block_path(reason)) {
 		if (is_locked)
 			spin_unlock_irqrestore(&psinfo->buf_lock, flags);
@@ -382,7 +445,8 @@ static void pstore_console_write(struct console *con, const char *s, unsigned c)
 static struct console pstore_console = {
 	.name	= "pstore",
 	.write	= pstore_console_write,
-	.flags	= CON_PRINTBUFFER | CON_ENABLED | CON_ANYTIME,
+	.flags	= CON_PRINTBUFFER | CON_ENABLED | CON_ANYTIME | CON_IGNORELEVEL
+		| CON_FAST,
 	.index	= -1,
 };
 
@@ -447,6 +511,7 @@ int pstore_register(struct pstore_info *psi)
 	if ((psi->flags & PSTORE_FLAGS_FRAGILE) == 0) {
 		pstore_register_console();
 		pstore_register_ftrace();
+		pstore_register_pmsg();
 	}
 
 	if (pstore_update_ms >= 0) {
@@ -461,6 +526,45 @@ int pstore_register(struct pstore_info *psi)
 	return 0;
 }
 EXPORT_SYMBOL_GPL(pstore_register);
+
+/*
+ * other pieces in kernel can register their extra dumper here
+ * if they want to dump their data into persistent storage when
+ * a crash happens but don't want to dump the data via kmsg.
+ */
+int pstore_register_extra_dumper(struct pstore_extra_dumper *extra_dumper)
+{
+	unsigned long flags;
+	if (!extra_dumper || (!extra_dumper->get_data))
+		return -EINVAL;
+
+	spin_lock_irqsave(&pstore_extra_dumper_lock, flags);
+	list_add_tail(&extra_dumper->list, &pstore_extra_dumper_list);
+	spin_unlock_irqrestore(&pstore_extra_dumper_lock, flags);
+
+	return 0;
+}
+EXPORT_SYMBOL_GPL(pstore_register_extra_dumper);
+
+/*
+ * unregister an extra dumper
+ */
+int pstore_unregister_extra_dumper(struct pstore_extra_dumper *extra_dumper)
+{
+	unsigned long flags;
+	struct pstore_extra_dumper *dumper;
+	struct pstore_extra_dumper *tmp;
+
+	spin_lock_irqsave(&pstore_extra_dumper_lock, flags);
+	list_for_each_entry_safe(dumper, tmp, &pstore_extra_dumper_list, list)
+		if (dumper == extra_dumper)
+			list_del(&dumper->list);
+
+	spin_unlock_irqrestore(&pstore_extra_dumper_lock, flags);
+	return 0;
+}
+EXPORT_SYMBOL_GPL(pstore_unregister_extra_dumper);
+
 
 /*
  * Read all the records from the persistent store. Create
@@ -497,6 +601,7 @@ void pstore_get_records(int quiet)
 							big_oops_buf_sz);
 
 			if (unzipped_len > 0) {
+				kfree(buf);
 				buf = big_oops_buf;
 				size = unzipped_len;
 				compressed = false;

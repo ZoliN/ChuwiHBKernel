@@ -64,6 +64,7 @@
 #define DW_IC_CLR_GEN_CALL	0x68
 #define DW_IC_ENABLE		0x6c
 #define DW_IC_STATUS		0x70
+#define DW_IC_STATUS_ACTIVE	BIT(0)
 #define DW_IC_TXFLR		0x74
 #define DW_IC_RXFLR		0x78
 #define DW_IC_SDA_HOLD		0x7c
@@ -87,6 +88,10 @@
 #define DW_IC_INTR_STOP_DET	0x200
 #define DW_IC_INTR_START_DET	0x400
 #define DW_IC_INTR_GEN_CALL	0x800
+#define	DW_IC_RESETS		0x804
+# define	DW_IC_RESETS_FUNC	BIT(0)
+# define	DW_IC_RESETS_APB	BIT(1)
+#define	DW_IC_GENERAL		0x808
 
 #define DW_IC_INTR_DEFAULT_MASK		(DW_IC_INTR_RX_FULL | \
 					 DW_IC_INTR_TX_EMPTY | \
@@ -198,6 +203,15 @@ void dw_writel(struct dw_i2c_dev *dev, u32 b, int offset)
 	}
 }
 
+static void dump_registers(struct dw_i2c_dev *dev)
+{
+	int offset;
+	for (offset = 0; offset <= DW_IC_COMP_TYPE; offset += 4) {
+		dev_err(dev->dev, "Offset 0x%02x, Value 0x%08x\n", offset,
+				dw_readl(dev, offset));
+	}
+
+}
 static u32
 i2c_dw_scl_hcnt(u32 ic_clk, u32 tSYMBOL, u32 tf, int cond, int offset)
 {
@@ -253,25 +267,29 @@ static u32 i2c_dw_scl_lcnt(u32 ic_clk, u32 tLOW, u32 tf, int offset)
 	return ((ic_clk * (tLOW + tf) + 5000) / 10000) - 1 + offset;
 }
 
-static void __i2c_dw_enable(struct dw_i2c_dev *dev, bool enable)
+static bool __i2c_dw_enable(struct dw_i2c_dev *dev, bool enable)
 {
-	int timeout = 100;
+	int timeout = 10;
 
 	do {
 		dw_writel(dev, enable, DW_IC_ENABLE);
 		if ((dw_readl(dev, DW_IC_ENABLE_STATUS) & 1) == enable)
-			return;
+			return true;
 
 		/*
 		 * Wait 10 times the signaling period of the highest I2C
 		 * transfer supported by the driver (for 400KHz this is
 		 * 25us) as described in the DesignWare I2C databook.
 		 */
-		usleep_range(25, 250);
+		if (dev->polling)
+			udelay(25);
+		else
+			usleep_range(25, 250);
 	} while (timeout--);
 
 	dev_warn(dev->dev, "timeout in %sabling adapter\n",
 		 enable ? "en" : "dis");
+	return false;
 }
 
 /**
@@ -281,14 +299,44 @@ static void __i2c_dw_enable(struct dw_i2c_dev *dev, bool enable)
  * This functions configures and enables the I2C master.
  * This function is called during I2C init function, and in case of timeout at
  * run time.
+ * This function must be wrapped by acquire_ownership for shared host.
  */
 int i2c_dw_init(struct dw_i2c_dev *dev)
 {
-	u32 input_clock_khz;
+	u32 input_clock_khz = dev->clk_rate_khz;
 	u32 hcnt, lcnt;
 	u32 reg;
+	int timeout = TIMEOUT;
 
-	input_clock_khz = dev->get_clk_rate_khz(dev);
+	do {
+		/*
+		 * We need to reset the controller if it's not accessible
+		 * or in active state.
+		 */
+		if (dw_readl(dev, DW_IC_COMP_TYPE) == DW_IC_COMP_TYPE_VALUE &&
+		    !(dw_readl(dev, DW_IC_STATUS) & DW_IC_STATUS_ACTIVE))
+			break;
+		/*
+		 * reset apb and clock domain
+		 */
+		dw_writel(dev, 0, DW_IC_RESETS);
+		if (dev->polling)
+			udelay(10);
+		else
+			usleep_range(10, 100);
+		dw_writel(dev, DW_IC_RESETS_APB | DW_IC_RESETS_FUNC,
+				DW_IC_RESETS);
+		if (dev->polling)
+			udelay(10);
+		else
+			usleep_range(10, 100);
+	} while (--timeout);
+
+	if (unlikely(timeout == 0)) {
+		dev_err(dev->dev, "controller time out\n");
+		dump_stack();
+		dump_registers(dev);
+	}
 
 	reg = dw_readl(dev, DW_IC_COMP_TYPE);
 	if (reg == ___constant_swab32(DW_IC_COMP_TYPE_VALUE)) {
@@ -380,19 +428,24 @@ static int i2c_dw_wait_bus_not_busy(struct dw_i2c_dev *dev)
 			return -ETIMEDOUT;
 		}
 		timeout--;
-		usleep_range(1000, 1100);
+		if (dev->polling) {
+			/* Wait less if it's a polling */
+			udelay(25);
+		} else
+			usleep_range(1000, 1100);
 	}
 
 	return 0;
 }
 
-static void i2c_dw_xfer_init(struct dw_i2c_dev *dev)
+static bool i2c_dw_xfer_init(struct dw_i2c_dev *dev)
 {
 	struct i2c_msg *msgs = dev->msgs;
 	u32 ic_con, ic_tar = 0;
 
 	/* Disable the adapter */
-	__i2c_dw_enable(dev, false);
+	if (!__i2c_dw_enable(dev, false))
+		return false;
 
 	/* if the slave address is ten bit address, enable 10BITADDR */
 	ic_con = dw_readl(dev, DW_IC_CON);
@@ -421,11 +474,15 @@ static void i2c_dw_xfer_init(struct dw_i2c_dev *dev)
 	i2c_dw_disable_int(dev);
 
 	/* Enable the adapter */
-	__i2c_dw_enable(dev, true);
+	if (!__i2c_dw_enable(dev, true))
+		return false;
 
 	/* Clear and enable interrupts */
 	i2c_dw_clear_int(dev);
-	dw_writel(dev, DW_IC_INTR_DEFAULT_MASK, DW_IC_INTR_MASK);
+	if (!dev->polling)
+		dw_writel(dev, DW_IC_INTR_DEFAULT_MASK, DW_IC_INTR_MASK);
+
+	return true;
 }
 
 /*
@@ -440,10 +497,13 @@ i2c_dw_xfer_msg(struct dw_i2c_dev *dev)
 	struct i2c_msg *msgs = dev->msgs;
 	u32 intr_mask;
 	int tx_limit, rx_limit;
-	u32 addr = msgs[dev->msg_write_idx].addr;
+	u32 addr = 0;
 	u32 buf_len = dev->tx_buf_len;
 	u8 *buf = dev->tx_buf;
 	bool need_restart = false;
+
+	if (dev->msg_write_idx < dev->msgs_num)
+		addr = msgs[dev->msg_write_idx].addr;
 
 	intr_mask = DW_IC_INTR_DEFAULT_MASK;
 
@@ -537,7 +597,8 @@ i2c_dw_xfer_msg(struct dw_i2c_dev *dev)
 	if (dev->msg_err)
 		intr_mask = 0;
 
-	dw_writel(dev, intr_mask,  DW_IC_INTR_MASK);
+	if (!dev->polling)
+		dw_writel(dev, intr_mask, DW_IC_INTR_MASK);
 }
 
 static void
@@ -590,6 +651,7 @@ static int i2c_dw_handle_tx_abort(struct dw_i2c_dev *dev)
 		return -EREMOTEIO;
 	}
 
+	dev_err(dev->dev, "abort_source = 0x%08lx\n", abort_source);
 	for_each_set_bit(i, &abort_source, ARRAY_SIZE(abort_sources))
 		dev_err(dev->dev, "%s: %s\n", __func__, abort_sources[i]);
 
@@ -599,6 +661,39 @@ static int i2c_dw_handle_tx_abort(struct dw_i2c_dev *dev)
 		return -EINVAL; /* wrong msgs[] data */
 	else
 		return -EIO;
+}
+
+/*
+ * Return value resembles wait_for_completion_timeout.
+ */
+static int i2c_dw_xfer_polling(struct dw_i2c_dev *dev)
+{
+	int ret = 1, timeout = 100000 /* 1 second timeout */;
+	u32 stat = 0;
+
+	while (--timeout) {
+		stat = dw_readl(dev, DW_IC_RAW_INTR_STAT);
+		/* If error occurs, set cmd_err and go out. */
+		if (stat & DW_IC_INTR_TX_ABRT) {
+			dev->cmd_err |= DW_IC_ERR_TX_ABRT;
+			dev->abort_source = dw_readl(dev, DW_IC_TX_ABRT_SOURCE);
+			dev->status = STATUS_IDLE;
+			goto out;
+		}
+
+		i2c_dw_read(dev);
+		i2c_dw_xfer_msg(dev);
+
+		if (stat & DW_IC_INTR_STOP_DET)
+			goto out;
+
+		udelay(10);
+	}
+
+	if (timeout ==  0)
+		ret = 0;
+out:
+	return ret;
 }
 
 /*
@@ -613,6 +708,13 @@ i2c_dw_xfer(struct i2c_adapter *adap, struct i2c_msg msgs[], int num)
 	dev_dbg(dev->dev, "%s: msgs: %d\n", __func__, num);
 
 	mutex_lock(&dev->lock);
+
+	if (dev->status & STATUS_SUSPENDED) {
+		mutex_unlock(&dev->lock);
+		dev_dbg(dev->dev, "i2c xfer after suspend!\n");
+		return -EIO;
+	}
+
 	pm_runtime_get_sync(dev->dev);
 
 	reinit_completion(&dev->cmd_complete);
@@ -626,21 +728,39 @@ i2c_dw_xfer(struct i2c_adapter *adap, struct i2c_msg msgs[], int num)
 	dev->abort_source = 0;
 	dev->rx_outstanding = 0;
 
+	/* if the host is shared between other units on the SoC */
+	if (dev->shared_host && dev->acquire_ownership) {
+		ret = dev->acquire_ownership();
+		if (ret < 0) {
+			dev_WARN(dev->dev, "couldnt acquire ownership\n");
+			goto out;
+		}
+	}
+
 	ret = i2c_dw_wait_bus_not_busy(dev);
 	if (ret < 0)
 		goto done;
 
-	/* start the transfers */
-	i2c_dw_xfer_init(dev);
+	/* start the transfers, retry i2c_dw_xfer_init on error */
+	if (!i2c_dw_xfer_init(dev)) {
+		ret = i2c_dw_init(dev) >= 0 && i2c_dw_xfer_init(dev);
+		if (!ret) {
+			dev_err(dev->dev, "xfer init failed\n");
+			ret = -EIO;
+			goto err_reset;
+		}
+	}
 
-	/* wait for tx to complete */
-	ret = wait_for_completion_timeout(&dev->cmd_complete, HZ);
+	if (dev->polling)
+		ret = i2c_dw_xfer_polling(dev);
+	else
+		/* wait for tx to complete */
+		ret = wait_for_completion_timeout(&dev->cmd_complete, 3 * HZ);
+
 	if (ret == 0) {
 		dev_err(dev->dev, "controller timed out\n");
-		/* i2c_dw_init implicitly disables the adapter */
-		i2c_dw_init(dev);
 		ret = -ETIMEDOUT;
-		goto done;
+		goto err_reset;
 	}
 
 	/*
@@ -650,7 +770,11 @@ i2c_dw_xfer(struct i2c_adapter *adap, struct i2c_msg msgs[], int num)
 	 * Needs some more investigation if the additional interrupts are
 	 * a hardware bug or this driver doesn't handle them correctly yet.
 	 */
-	__i2c_dw_enable(dev, false);
+	if (!__i2c_dw_enable(dev, false)) {
+		dev_err(dev->dev, "i2c dw disabling failed\n");
+		ret = -EIO;
+		goto err_reset;
+	}
 
 	if (dev->msg_err) {
 		ret = dev->msg_err;
@@ -670,7 +794,14 @@ i2c_dw_xfer(struct i2c_adapter *adap, struct i2c_msg msgs[], int num)
 	}
 	ret = -EIO;
 
+err_reset:
+	i2c_dw_init(dev);
+
 done:
+	if (dev->shared_host && dev->release_ownership)
+		dev->release_ownership();
+
+out:
 	pm_runtime_mark_last_busy(dev->dev);
 	pm_runtime_put_autosuspend(dev->dev);
 	mutex_unlock(&dev->lock);
@@ -784,8 +915,17 @@ irqreturn_t i2c_dw_isr(int this_irq, void *dev_id)
 	 */
 
 tx_aborted:
-	if ((stat & (DW_IC_INTR_TX_ABRT | DW_IC_INTR_STOP_DET)) || dev->msg_err)
+	if ((stat & (DW_IC_INTR_TX_ABRT | DW_IC_INTR_STOP_DET)) || dev->msg_err) {
+		/*
+		 * Check DW_IC_RXFLR register and
+		 * read from the RX FIFO if it's not
+		 * empty.
+		 */
+		if ((stat & DW_IC_INTR_STOP_DET) &&
+			dw_readl(dev, DW_IC_RXFLR) > 0)
+			i2c_dw_read(dev);
 		complete(&dev->cmd_complete);
+	}
 
 	return IRQ_HANDLED;
 }

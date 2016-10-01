@@ -7,6 +7,9 @@
 #include <linux/ktime.h>
 #include <linux/pm_qos.h>
 #include <linux/tracepoint.h>
+#include <linux/ftrace_event.h>
+
+#define TPS(x)  tracepoint_string(x)
 
 DECLARE_EVENT_CLASS(cpu,
 
@@ -83,12 +86,49 @@ TRACE_EVENT(pstate_sample,
 
 );
 
+TRACE_EVENT(pstate_byt_set,
+
+	TP_PROTO(u32 pstate,
+		u32 vid
+		),
+
+	TP_ARGS(pstate,
+		vid
+		),
+
+	TP_STRUCT__entry(
+		__field(u32, pstate)
+		__field(u32, vid)
+		),
+
+	TP_fast_assign(
+		__entry->pstate = pstate;
+		__entry->vid = vid;
+		),
+
+	TP_printk("pstate=%lu vid=%lu  ",
+		(unsigned long)__entry->pstate,
+		(unsigned long)__entry->vid
+		)
+);
+
 /* This file can get included multiple times, TRACE_HEADER_MULTI_READ at top */
 #ifndef _PWR_EVENT_AVOID_DOUBLE_DEFINING
 #define _PWR_EVENT_AVOID_DOUBLE_DEFINING
 
 #define PWR_EVENT_EXIT -1
 #endif
+
+#define pm_verb_symbolic(event) \
+	__print_symbolic(event, \
+		{ PM_EVENT_SUSPEND, "suspend" }, \
+		{ PM_EVENT_RESUME, "resume" }, \
+		{ PM_EVENT_FREEZE, "freeze" }, \
+		{ PM_EVENT_QUIESCE, "quiesce" }, \
+		{ PM_EVENT_HIBERNATE, "hibernate" }, \
+		{ PM_EVENT_THAW, "thaw" }, \
+		{ PM_EVENT_RESTORE, "restore" }, \
+		{ PM_EVENT_RECOVER, "recover" })
 
 DEFINE_EVENT(cpu, cpu_frequency,
 
@@ -97,21 +137,100 @@ DEFINE_EVENT(cpu, cpu_frequency,
 	TP_ARGS(frequency, cpu_id)
 );
 
-TRACE_EVENT(machine_suspend,
+TRACE_EVENT(cpu_frequency_limits,
 
-	TP_PROTO(unsigned int state),
+	TP_PROTO(unsigned int max_freq, unsigned int min_freq,
+		unsigned int cpu_id),
 
-	TP_ARGS(state),
+	TP_ARGS(max_freq, min_freq, cpu_id),
 
 	TP_STRUCT__entry(
-		__field(	u32,		state		)
+		__field(	u32,		min_freq	)
+		__field(	u32,		max_freq	)
+		__field(	u32,		cpu_id		)
 	),
 
 	TP_fast_assign(
-		__entry->state = state;
+		__entry->min_freq = min_freq;
+		__entry->max_freq = min_freq;
+		__entry->cpu_id = cpu_id;
 	),
 
-	TP_printk("state=%lu", (unsigned long)__entry->state)
+	TP_printk("min=%lu max=%lu cpu_id=%lu",
+		  (unsigned long)__entry->min_freq,
+		  (unsigned long)__entry->max_freq,
+		  (unsigned long)__entry->cpu_id)
+);
+
+TRACE_EVENT(device_pm_callback_start,
+
+	TP_PROTO(struct device *dev, const char *pm_ops, int event_in),
+
+	TP_ARGS(dev, pm_ops, event_in),
+
+	TP_STRUCT__entry(
+		__string(device, dev_name(dev))
+		__string(driver, dev_driver_string(dev))
+		__string(parent, dev->parent ? dev_name(dev->parent) : "none")
+		__string(pm_ops, pm_ops ? pm_ops : "none ")
+		__field(int, event)
+	),
+
+	TP_fast_assign(
+		__assign_str(device, dev_name(dev));
+		__assign_str(driver, dev_driver_string(dev));
+		__assign_str(parent, dev->parent ? dev_name(dev->parent) : "none");
+		__assign_str(pm_ops, pm_ops ? pm_ops : "none ");
+		__entry->event = event_in;
+	),
+
+	TP_printk("%s %s, parent: %s, %s[%s]", __get_str(driver),
+		__get_str(device), __get_str(parent), __get_str(pm_ops),
+		pm_verb_symbolic(__entry->event))
+);
+
+TRACE_EVENT(device_pm_callback_end,
+
+	TP_PROTO(struct device *dev, int error_in),
+
+	TP_ARGS(dev, error_in),
+
+	TP_STRUCT__entry(
+		__string(device, dev_name(dev))
+		__string(driver, dev_driver_string(dev))
+		__field(int, error)
+	),
+
+	TP_fast_assign(
+		__assign_str(device, dev_name(dev));
+		__assign_str(driver, dev_driver_string(dev));
+		__entry->error = error_in;
+	),
+
+	TP_printk("%s %s, err=%d",
+		__get_str(driver), __get_str(device), __entry->error)
+);
+
+TRACE_EVENT(suspend_resume,
+
+	TP_PROTO(const char *action, int val, bool start),
+
+	TP_ARGS(action, val, start),
+
+	TP_STRUCT__entry(
+		__field(const char *, action)
+		__field(int, val)
+		__field(bool, start)
+	),
+
+	TP_fast_assign(
+		__entry->action = action;
+		__entry->val = val;
+		__entry->start = start;
+ 	),
+ 
+	TP_printk("%s[%u] %s", __entry->action, (unsigned int)__entry->val,
+		(__entry->start)?"begin":"end")
 );
 
 TRACE_EVENT(device_pm_report_time,
@@ -230,6 +349,25 @@ DEFINE_EVENT(clock, clock_set_rate,
 	TP_PROTO(const char *name, unsigned int state, unsigned int cpu_id),
 
 	TP_ARGS(name, state, cpu_id)
+);
+
+TRACE_EVENT(clock_set_parent,
+
+	TP_PROTO(const char *name, const char *parent_name),
+
+	TP_ARGS(name, parent_name),
+
+	TP_STRUCT__entry(
+		__string(       name,           name            )
+		__string(       parent_name,    parent_name     )
+	),
+
+	TP_fast_assign(
+		__assign_str(name, name);
+		__assign_str(parent_name, parent_name);
+	),
+
+	TP_printk("%s parent=%s", __get_str(name), __get_str(parent_name))
 );
 
 /*

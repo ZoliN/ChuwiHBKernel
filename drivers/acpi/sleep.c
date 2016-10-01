@@ -19,11 +19,24 @@
 #include <linux/acpi.h>
 #include <linux/module.h>
 #include <asm/io.h>
+#include <asm/mwait.h>
+#include <trace/events/power.h>
 
 #include "internal.h"
 #include "sleep.h"
 
 static u8 sleep_states[ACPI_S_STATE_COUNT];
+/*
+ * Platform architectures may support hardware power management
+ * models other than the traditional ACPI Sleep/Resume model.
+ * These are typically implemented in proprietary hardware and
+ * are capable of delivering low-latency, connected idle while
+ * saving as much energy as ACPI Sleep states. To support the
+ * diversity of hardware implementations
+ */
+static u8 low_power_s0idle;
+char	*s0idle_str = "S0idle";
+#define	ACPI_S_STATE_STR_LEN	32
 
 static void acpi_sleep_tts_switch(u32 acpi_state)
 {
@@ -80,6 +93,11 @@ static bool acpi_sleep_state_supported(u8 sleep_state)
 	return ACPI_SUCCESS(status) && (!acpi_gbl_reduced_hardware
 		|| (acpi_gbl_FADT.sleep_control.address
 			&& acpi_gbl_FADT.sleep_status.address));
+}
+
+static bool acpi_low_power_s0idle_supported(void)
+{
+	return acpi_gbl_FADT.flags & ACPI_FADT_LOW_POWER_S0;
 }
 
 #ifdef CONFIG_ACPI_SLEEP
@@ -364,7 +382,12 @@ static int __acpi_pm_prepare(void)
  */
 static int acpi_pm_prepare(void)
 {
-	int error = __acpi_pm_prepare();
+	int error = 0;
+
+	if (acpi_target_sleep_state == ACPI_STATE_S0)
+		return error;
+
+	error = __acpi_pm_prepare();
 	if (!error)
 		error = acpi_pm_pre_suspend();
 
@@ -390,11 +413,11 @@ static void acpi_pm_finish(void)
 	struct device *pwr_btn_dev;
 	u32 acpi_state = acpi_target_sleep_state;
 
-	acpi_ec_unblock_transactions();
-	suspend_nvs_free();
-
 	if (acpi_state == ACPI_STATE_S0)
 		return;
+
+	acpi_ec_unblock_transactions();
+	suspend_nvs_free();
 
 	printk(KERN_INFO PREFIX "Waking up from system sleep state S%d\n",
 		acpi_state);
@@ -441,6 +464,9 @@ static void acpi_pm_start(u32 acpi_state)
  */
 static void acpi_pm_end(void)
 {
+	if (acpi_target_sleep_state == ACPI_STATE_S0)
+		return;
+
 	acpi_scan_lock_release();
 	/*
 	 * This is necessary in case acpi_pm_finish() is not called during a
@@ -468,17 +494,32 @@ static u32 acpi_suspend_states[] = {
  */
 static int acpi_suspend_begin(suspend_state_t pm_state)
 {
-	u32 acpi_state = acpi_suspend_states[pm_state];
+	u32 acpi_state;
 	int error;
+
+	acpi_state = acpi_suspend_states[pm_state];
+
+	if (!sleep_states[acpi_state]) {
+		/*
+		 * exception: if the platform architectures support
+		 * low power S0idle mode, we should return ACPI_STATE_S0
+		 * here to let the hardware manage power autonomously
+		 */
+		if (pm_state == PM_SUSPEND_MEM && low_power_s0idle) {
+			acpi_state = ACPI_STATE_S0;
+		} else {
+			pr_err("ACPI does not support sleep state S%u\n",
+				acpi_state);
+			return -ENOSYS;
+		}
+	}
+
+	if (acpi_state == ACPI_STATE_S0)
+		return 0;
 
 	error = (nvs_nosave || nvs_nosave_s3) ? 0 : suspend_nvs_alloc();
 	if (error)
 		return error;
-
-	if (!sleep_states[acpi_state]) {
-		pr_err("ACPI does not support sleep state S%u\n", acpi_state);
-		return -ENOSYS;
-	}
 
 	acpi_pm_start(acpi_state);
 	return 0;
@@ -495,12 +536,21 @@ static int acpi_suspend_begin(suspend_state_t pm_state)
 static int acpi_suspend_enter(suspend_state_t pm_state)
 {
 	acpi_status status = AE_OK;
-	u32 acpi_state = acpi_target_sleep_state;
+	u32 acpi_state = acpi_target_sleep_state, tmp;
 	int error;
 
 	ACPI_FLUSH_CPU_CACHE();
 
+	trace_suspend_resume(TPS("acpi_suspend"), acpi_state, true);
 	switch (acpi_state) {
+	case ACPI_STATE_S0:
+		pm_suspend_dev_state();
+		pr_info(PREFIX "suspend to mwait\n");
+		__monitor((void *)&tmp, 0, 0);
+		smp_mb();
+		__mwait(0x64, 1);
+		pr_info(PREFIX "resume from mwait\n");
+		return 0;
 	case ACPI_STATE_S1:
 		barrier();
 		status = acpi_enter_sleep_state(acpi_state);
@@ -515,6 +565,7 @@ static int acpi_suspend_enter(suspend_state_t pm_state)
 		pr_info(PREFIX "Low-level resume complete\n");
 		break;
 	}
+	trace_suspend_resume(TPS("acpi_suspend"), acpi_state, false);
 
 	/* This violates the spec but is required for bug compatibility. */
 	acpi_write_bit_register(ACPI_BITREG_SCI_ENABLE, 1);
@@ -564,10 +615,16 @@ static int acpi_suspend_state_valid(suspend_state_t pm_state)
 	switch (pm_state) {
 	case PM_SUSPEND_ON:
 	case PM_SUSPEND_STANDBY:
-	case PM_SUSPEND_MEM:
 		acpi_state = acpi_suspend_states[pm_state];
 
 		return sleep_states[acpi_state];
+	case PM_SUSPEND_MEM:
+		acpi_state = acpi_suspend_states[pm_state];
+		/*
+		 * S3 is supported via PM_SUSPEND_MEM,
+		 * as well as low power S0idle
+		 */
+		return sleep_states[acpi_state] || low_power_s0idle;
 	default:
 		return 0;
 	}
@@ -618,6 +675,9 @@ static void acpi_sleep_suspend_setup(void)
 	for (i = ACPI_STATE_S1; i < ACPI_STATE_S4; i++)
 		if (acpi_sleep_state_supported(i))
 			sleep_states[i] = 1;
+
+	if (acpi_low_power_s0idle_supported())
+		low_power_s0idle = 1;
 
 	suspend_set_ops(old_suspend_ordering ?
 		&acpi_suspend_ops_old : &acpi_suspend_ops);
@@ -794,7 +854,7 @@ static void acpi_power_off(void)
 
 int __init acpi_sleep_init(void)
 {
-	char supported[ACPI_S_STATE_COUNT * 3 + 1];
+	char supported[ACPI_S_STATE_STR_LEN];
 	char *pos = supported;
 	int i;
 
@@ -816,8 +876,11 @@ int __init acpi_sleep_init(void)
 		if (sleep_states[i])
 			pos += sprintf(pos, " S%d", i);
 	}
-	pr_info(PREFIX "(supports%s)\n", supported);
 
+	if (low_power_s0idle)
+		pos += sprintf(pos, " %s", s0idle_str);
+
+	pr_info(PREFIX "(supports%s)\n", supported);
 	/*
 	 * Register the tts_notifier to reboot notifier list so that the _TTS
 	 * object can also be evaluated when the system enters S5.

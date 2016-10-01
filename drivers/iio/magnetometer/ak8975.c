@@ -31,6 +31,7 @@
 #include <linux/bitops.h>
 #include <linux/gpio.h>
 #include <linux/of_gpio.h>
+#include <linux/acpi.h>
 
 #include <linux/iio/iio.h>
 #include <linux/iio/sysfs.h>
@@ -85,7 +86,15 @@
 #define AK8975_MAX_CONVERSION_TIMEOUT	500
 #define AK8975_CONVERSION_DONE_POLL_TIME 10
 #define AK8975_DATA_READY_TIMEOUT	((100*HZ)/1000)
-#define RAW_TO_GAUSS(asa) ((((asa) + 128) * 3000) / 256)
+#define RAW_TO_GAUSS_8975(asa) ((((asa) + 128) * 3000) / 256)
+#define RAW_TO_GAUSS_8963(asa) ((((asa) + 128) * 6000) / 256)
+
+/* Compatible Asahi Kasei Compass parts */
+enum asahi_compass_chipset {
+	AK8975,
+	AK8963,
+	AK_INVALID,
+};
 
 /*
  * Per-instance context data for the device.
@@ -101,6 +110,7 @@ struct ak8975_data {
 	int			eoc_irq;
 	wait_queue_head_t	data_ready_queue;
 	unsigned long		flags;
+	int			chipset;
 };
 
 static const int ak8975_index_to_reg[] = {
@@ -226,9 +236,15 @@ static int ak8975_setup(struct i2c_client *client)
 	if (data->eoc_gpio > 0 || client->irq) {
 		ret = ak8975_setup_irq(data);
 		if (ret < 0) {
-			dev_err(&client->dev,
-				"Error setting data ready interrupt\n");
-			return ret;
+			if (ret == -EBUSY) {
+				dev_err(&client->dev,
+					"device Intr busy:polling required\n");
+				ret = 0;
+			} else {
+				dev_err(&client->dev,
+					"Error setting data ready interrupt\n");
+				return ret;
+			}
 		}
 	}
 
@@ -272,9 +288,21 @@ static int ak8975_setup(struct i2c_client *client)
  * Since ASA doesn't change, we cache the resultant scale factor into the
  * device context in ak8975_setup().
  */
-	data->raw_to_gauss[0] = RAW_TO_GAUSS(data->asa[0]);
-	data->raw_to_gauss[1] = RAW_TO_GAUSS(data->asa[1]);
-	data->raw_to_gauss[2] = RAW_TO_GAUSS(data->asa[2]);
+	if (data->chipset == AK8963) {
+		/*
+		 * H range is +-8190 and magnetometer range is +-4912.
+		 * So HuT using the above explanation for 8975,
+		 * 4912/8190 = ~ 6/10.
+		 * So the Hadj should use 6/10 instead of 3/10.
+		 */
+		data->raw_to_gauss[0] = RAW_TO_GAUSS_8963(data->asa[0]);
+		data->raw_to_gauss[1] = RAW_TO_GAUSS_8963(data->asa[1]);
+		data->raw_to_gauss[2] = RAW_TO_GAUSS_8963(data->asa[2]);
+	} else {
+		data->raw_to_gauss[0] = RAW_TO_GAUSS_8975(data->asa[0]);
+		data->raw_to_gauss[1] = RAW_TO_GAUSS_8975(data->asa[1]);
+		data->raw_to_gauss[2] = RAW_TO_GAUSS_8975(data->asa[2]);
+	}
 
 	return 0;
 }
@@ -448,6 +476,27 @@ static const struct iio_info ak8975_info = {
 	.driver_module = THIS_MODULE,
 };
 
+static const struct acpi_device_id inv_acpi_match[] = {
+	{"AK8975", 0},
+	{"AK8963", AK8963},
+	{"INVN6500", AK8963},
+	{ },
+};
+MODULE_DEVICE_TABLE(acpi, inv_acpi_match);
+
+static char *ak8975_match_acpi_device(struct device *dev,
+							int *chipset)
+{
+	const struct acpi_device_id *id;
+
+	id = acpi_match_device(dev->driver->acpi_match_table, dev);
+	if (!id)
+		return NULL;
+	*chipset = (int)id->driver_data;
+
+	return (char *)dev_name(dev);
+}
+
 static int ak8975_probe(struct i2c_client *client,
 			const struct i2c_device_id *id)
 {
@@ -455,7 +504,10 @@ static int ak8975_probe(struct i2c_client *client,
 	struct iio_dev *indio_dev;
 	int eoc_gpio;
 	int err;
+	char *name = NULL;
 
+	if (id)
+		name = (char *) id->name;
 	/* Grab and set up the supplied GPIO. */
 	if (client->dev.platform_data)
 		eoc_gpio = *(int *)(client->dev.platform_data);
@@ -492,6 +544,24 @@ static int ak8975_probe(struct i2c_client *client,
 	data->eoc_gpio = eoc_gpio;
 	data->eoc_irq = 0;
 
+	if (id) {
+		data->chipset = (int)(id->driver_data);
+		if (data->chipset == AK8963)
+			dev_dbg(&client->dev,
+				"AK8975 driver is running in AK8963 mode\n");
+		else
+			dev_dbg(&client->dev,
+				"AK8975 driver is running in normal mode\n");
+	}
+	if (ACPI_HANDLE(&client->dev)) {
+		int chip_id;
+
+		name = ak8975_match_acpi_device(&client->dev, &chip_id);
+		if (chip_id > 0)
+			data->chipset = chip_id;
+	}
+	dev_dbg(&client->dev, "Running in 8963 compatible mode\n");
+
 	/* Perform some basic start-of-day setup of the device. */
 	err = ak8975_setup(client);
 	if (err < 0) {
@@ -507,7 +577,7 @@ static int ak8975_probe(struct i2c_client *client,
 	indio_dev->num_channels = ARRAY_SIZE(ak8975_channels);
 	indio_dev->info = &ak8975_info;
 	indio_dev->modes = INDIO_DIRECT_MODE;
-
+	indio_dev->name = name;
 	err = iio_device_register(indio_dev);
 	if (err < 0)
 		goto exit_free_iio;
@@ -545,6 +615,7 @@ static int ak8975_remove(struct i2c_client *client)
 
 static const struct i2c_device_id ak8975_id[] = {
 	{"ak8975", 0},
+	{"ak8963", AK8963},
 	{}
 };
 
@@ -561,6 +632,7 @@ static struct i2c_driver ak8975_driver = {
 	.driver = {
 		.name	= "ak8975",
 		.of_match_table = ak8975_of_match,
+		.acpi_match_table = ACPI_PTR(inv_acpi_match),
 	},
 	.probe		= ak8975_probe,
 	.remove		= ak8975_remove,

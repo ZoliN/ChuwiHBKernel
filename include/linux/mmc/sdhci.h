@@ -100,6 +100,8 @@ struct sdhci_host {
 #define SDHCI_QUIRK2_BROKEN_HOST_CONTROL		(1<<5)
 /* Controller does not support HS200 */
 #define SDHCI_QUIRK2_BROKEN_HS200			(1<<6)
+#define SDHCI_QUIRK2_TUNING_POLL			(1<<7)
+#define SDHCI_QUIRK2_FAKE_VDD				(1<<8)
 
 	int irq;		/* Device IRQ */
 	void __iomem *ioaddr;	/* Mapped address */
@@ -108,6 +110,7 @@ struct sdhci_host {
 
 	struct regulator *vmmc;		/* Power regulator (vmmc) */
 	struct regulator *vqmmc;	/* Signaling regulator (vccq) */
+	bool vqmmc_enabled;			/* vqmmc regulator status */
 
 	/* Internal data */
 	struct mmc_host *mmc;	/* MMC structure */
@@ -150,6 +153,7 @@ struct sdhci_host {
 	struct mmc_command *cmd;	/* Current command */
 	struct mmc_data *data;	/* Current data request */
 	unsigned int data_early:1;	/* Data finished before cmd */
+	unsigned int busy_handle:1;	/* Handling the order of Busy-end */
 
 	struct sg_mapping_iter sg_miter;	/* SG state for PIO */
 	unsigned int blocks;	/* remaining PIO blocks */
@@ -164,8 +168,10 @@ struct sdhci_host {
 
 	struct tasklet_struct card_tasklet;	/* Tasklet structures */
 	struct tasklet_struct finish_tasklet;
+	struct tasklet_struct finish_async_data_tasklet;
 
 	struct timer_list timer;	/* Timer for timeouts */
+	struct timer_list async_data_timer;	/* Timer for SW CMDQ timeouts */
 
 	u32 caps;		/* Alternative CAPABILITY_0 */
 	u32 caps1;		/* Alternative CAPABILITY_1 */

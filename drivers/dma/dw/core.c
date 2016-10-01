@@ -145,9 +145,6 @@ static void dwc_initialize(struct dw_dma_chan *dwc)
 	u32 cfghi = DWC_CFGH_FIFO_MODE;
 	u32 cfglo = DWC_CFGL_CH_PRIOR(dwc->priority);
 
-	if (dwc->initialized == true)
-		return;
-
 	if (dws) {
 		/*
 		 * We need controller-specific data to set up slave
@@ -170,8 +167,6 @@ static void dwc_initialize(struct dw_dma_chan *dwc)
 	/* Enable interrupts */
 	channel_set_bit(dw, MASK.XFER, dwc->mask);
 	channel_set_bit(dw, MASK.ERROR, dwc->mask);
-
-	dwc->initialized = true;
 }
 
 /*----------------------------------------------------------------------*/
@@ -1010,6 +1005,9 @@ static int dwc_control(struct dma_chan *chan, enum dma_ctrl_cmd cmd,
 
 		spin_unlock_irqrestore(&dwc->lock, flags);
 	} else if (cmd == DMA_RESUME) {
+		if (!(dma_readl(dw, CFG) & DW_CFG_DMA_EN))
+			dma_writel(dw, CFG, DW_CFG_DMA_EN);
+
 		if (!dwc->paused)
 			return 0;
 
@@ -1177,7 +1175,6 @@ static void dwc_free_chan_resources(struct dma_chan *chan)
 	spin_lock_irqsave(&dwc->lock, flags);
 	list_splice_init(&dwc->free_list, &list);
 	dwc->descs_allocated = 0;
-	dwc->initialized = false;
 	dwc->request_line = ~0;
 
 	/* Disable interrupts */
@@ -1458,8 +1455,6 @@ EXPORT_SYMBOL(dw_dma_cyclic_free);
 
 static void dw_dma_off(struct dw_dma *dw)
 {
-	int i;
-
 	dma_writel(dw, CFG, 0);
 
 	channel_clear_bit(dw, MASK.XFER, dw->all_chan_mask);
@@ -1469,9 +1464,6 @@ static void dw_dma_off(struct dw_dma *dw)
 
 	while (dma_readl(dw, CFG) & DW_CFG_DMA_EN)
 		cpu_relax();
-
-	for (i = 0; i < dw->dma.chancnt; i++)
-		dw->chan[i].initialized = false;
 }
 
 int dw_dma_probe(struct dw_dma_chip *chip, struct dw_dma_platform_data *pdata)
@@ -1512,10 +1504,12 @@ int dw_dma_probe(struct dw_dma_chip *chip, struct dw_dma_platform_data *pdata)
 	if (!dw)
 		return -ENOMEM;
 
-	dw->clk = devm_clk_get(chip->dev, "hclk");
-	if (IS_ERR(dw->clk))
-		return PTR_ERR(dw->clk);
-	clk_prepare_enable(dw->clk);
+	if (!pdata->no_hclk) {
+		dw->clk = devm_clk_get(chip->dev, "hclk");
+		if (IS_ERR(dw->clk))
+			return PTR_ERR(dw->clk);
+		clk_prepare_enable(dw->clk);
+	}
 
 	dw->regs = chip->regs;
 	chip->dw = dw;
@@ -1675,23 +1669,14 @@ int dw_dma_remove(struct dw_dma_chip *chip)
 }
 EXPORT_SYMBOL_GPL(dw_dma_remove);
 
-void dw_dma_shutdown(struct dw_dma_chip *chip)
-{
-	struct dw_dma *dw = chip->dw;
-
-	dw_dma_off(dw);
-	clk_disable_unprepare(dw->clk);
-}
-EXPORT_SYMBOL_GPL(dw_dma_shutdown);
-
 #ifdef CONFIG_PM_SLEEP
 
 int dw_dma_suspend(struct dw_dma_chip *chip)
 {
 	struct dw_dma *dw = chip->dw;
 
-	dw_dma_off(dw);
-	clk_disable_unprepare(dw->clk);
+	if (dw->clk)
+		clk_disable_unprepare(dw->clk);
 
 	return 0;
 }
@@ -1701,8 +1686,8 @@ int dw_dma_resume(struct dw_dma_chip *chip)
 {
 	struct dw_dma *dw = chip->dw;
 
-	clk_prepare_enable(dw->clk);
-	dma_writel(dw, CFG, DW_CFG_DMA_EN);
+	if (dw->clk)
+		clk_prepare_enable(dw->clk);
 
 	return 0;
 }

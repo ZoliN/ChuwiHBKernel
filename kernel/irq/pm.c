@@ -10,7 +10,7 @@
 #include <linux/module.h>
 #include <linux/interrupt.h>
 #include <linux/syscore_ops.h>
-
+#include <linux/wakeup_reason.h>
 #include "internals.h"
 
 /**
@@ -95,6 +95,27 @@ void resume_device_irqs(void)
 EXPORT_SYMBOL_GPL(resume_device_irqs);
 
 /**
+ * dump_wakeup_irqs - dump info if any wake-up interrupts are pending
+ */
+void dump_wakeup_irqs(void)
+{
+	struct irq_desc *desc;
+	int irq;
+
+	for_each_irq_desc(irq, desc) {
+		if (irqd_is_wakeup_set(&desc->irq_data)) {
+			if (desc->istate & IRQS_PENDING) {
+				pr_info("Wakeup IRQ %d %s pending\n",
+					irq,
+					desc->action && desc->action->name ?
+					desc->action->name : "");
+			}
+			continue;
+		}
+	}
+}
+
+/**
  * check_wakeup_irqs - check if any wake-up interrupts are pending
  */
 int check_wakeup_irqs(void)
@@ -103,14 +124,18 @@ int check_wakeup_irqs(void)
 	int irq;
 
 	for_each_irq_desc(irq, desc) {
-		/*
-		 * Only interrupts which are marked as wakeup source
-		 * and have not been disabled before the suspend check
-		 * can abort suspend.
-		 */
 		if (irqd_is_wakeup_set(&desc->irq_data)) {
-			if (desc->depth == 1 && desc->istate & IRQS_PENDING)
+			if (desc->istate & IRQS_PENDING) {
+				log_suspend_abort_reason("Wakeup IRQ %d %s pending",
+					irq,
+					desc->action && desc->action->name ?
+					desc->action->name : "");
+				pr_info("Wakeup IRQ %d %s pending, suspend aborted\n",
+					irq,
+					desc->action && desc->action->name ?
+					desc->action->name : "");
 				return -EBUSY;
+			}
 			continue;
 		}
 		/*

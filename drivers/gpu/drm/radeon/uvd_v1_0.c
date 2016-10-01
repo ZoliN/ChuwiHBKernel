@@ -265,7 +265,7 @@ int uvd_v1_0_start(struct radeon_device *rdev)
 	/* Initialize the ring buffer's read and write pointers */
 	WREG32(UVD_RBC_RB_RPTR, 0x0);
 
-	ring->wptr = ring->rptr = RREG32(UVD_RBC_RB_RPTR);
+	ring->wptr = RREG32(UVD_RBC_RB_RPTR);
 	WREG32(UVD_RBC_RB_WPTR, ring->wptr);
 
 	/* set the ring address */
@@ -365,8 +365,18 @@ bool uvd_v1_0_semaphore_emit(struct radeon_device *rdev,
 			     struct radeon_semaphore *semaphore,
 			     bool emit_wait)
 {
-	/* disable semaphores for UVD V1 hardware */
-	return false;
+	uint64_t addr = semaphore->gpu_addr;
+
+	radeon_ring_write(ring, PACKET0(UVD_SEMA_ADDR_LOW, 0));
+	radeon_ring_write(ring, (addr >> 3) & 0x000FFFFF);
+
+	radeon_ring_write(ring, PACKET0(UVD_SEMA_ADDR_HIGH, 0));
+	radeon_ring_write(ring, (addr >> 23) & 0x000FFFFF);
+
+	radeon_ring_write(ring, PACKET0(UVD_SEMA_CMD, 0));
+	radeon_ring_write(ring, emit_wait ? 1 : 0);
+
+	return true;
 }
 
 /**

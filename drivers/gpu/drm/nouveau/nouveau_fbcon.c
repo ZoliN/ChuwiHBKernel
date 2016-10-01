@@ -183,30 +183,8 @@ nouveau_fbcon_sync(struct fb_info *info)
 	return 0;
 }
 
-static int
-nouveau_fbcon_open(struct fb_info *info, int user)
-{
-	struct nouveau_fbdev *fbcon = info->par;
-	struct nouveau_drm *drm = nouveau_drm(fbcon->dev);
-	int ret = pm_runtime_get_sync(drm->dev->dev);
-	if (ret < 0 && ret != -EACCES)
-		return ret;
-	return 0;
-}
-
-static int
-nouveau_fbcon_release(struct fb_info *info, int user)
-{
-	struct nouveau_fbdev *fbcon = info->par;
-	struct nouveau_drm *drm = nouveau_drm(fbcon->dev);
-	pm_runtime_put(drm->dev->dev);
-	return 0;
-}
-
 static struct fb_ops nouveau_fbcon_ops = {
 	.owner = THIS_MODULE,
-	.fb_open = nouveau_fbcon_open,
-	.fb_release = nouveau_fbcon_release,
 	.fb_check_var = drm_fb_helper_check_var,
 	.fb_set_par = drm_fb_helper_set_par,
 	.fb_fillrect = nouveau_fbcon_fillrect,
@@ -222,8 +200,6 @@ static struct fb_ops nouveau_fbcon_ops = {
 
 static struct fb_ops nouveau_fbcon_sw_ops = {
 	.owner = THIS_MODULE,
-	.fb_open = nouveau_fbcon_open,
-	.fb_release = nouveau_fbcon_release,
 	.fb_check_var = drm_fb_helper_check_var,
 	.fb_set_par = drm_fb_helper_set_par,
 	.fb_fillrect = cfb_fillrect,
@@ -462,7 +438,7 @@ void nouveau_fbcon_gpu_lockup(struct fb_info *info)
 	info->flags |= FBINFO_HWACCEL_DISABLED;
 }
 
-static struct drm_fb_helper_funcs nouveau_fbcon_helper_funcs = {
+static const struct drm_fb_helper_funcs nouveau_fbcon_helper_funcs = {
 	.gamma_set = nouveau_fbcon_gamma_set,
 	.gamma_get = nouveau_fbcon_gamma_get,
 	.fb_probe = nouveau_fbcon_create,
@@ -488,7 +464,8 @@ nouveau_fbcon_init(struct drm_device *dev)
 
 	fbcon->dev = dev;
 	drm->fbcon = fbcon;
-	fbcon->helper.funcs = &nouveau_fbcon_helper_funcs;
+
+	drm_fb_helper_prepare(dev, &fbcon->helper, &nouveau_fbcon_helper_funcs);
 
 	ret = drm_fb_helper_init(dev, &fbcon->helper,
 				 dev->mode_config.num_crtc, 4);
@@ -552,10 +529,10 @@ nouveau_fbcon_set_suspend(struct drm_device *dev, int state)
 	struct nouveau_drm *drm = nouveau_drm(dev);
 	if (drm->fbcon) {
 		console_lock();
-		if (state == 0)
+		if (state == 1)
 			nouveau_fbcon_save_disable_accel(dev);
 		fb_set_suspend(drm->fbcon->helper.fbdev, state);
-		if (state == 1)
+		if (state == 0)
 			nouveau_fbcon_restore_accel(dev);
 		console_unlock();
 	}

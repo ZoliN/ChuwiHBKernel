@@ -44,19 +44,21 @@ static ssize_t power_supply_show_property(struct device *dev,
 					  struct device_attribute *attr,
 					  char *buf) {
 	static char *type_text[] = {
-		"Unknown", "Battery", "UPS", "Mains", "USB",
-		"USB_DCP", "USB_CDP", "USB_ACA"
+		"Unknown", "Battery", "UPS", "Mains", "USB", "USB",
+		"USB_DCP", "USB_CDP", "USB_ACA", "USB_HOST", "USB_TYPEC",
+		"Wireless"
 	};
 	static char *status_text[] = {
-		"Unknown", "Charging", "Discharging", "Not charging", "Full"
+		"Unknown", "Charging", "Discharging", "Not charging", "Full",
+		"Pru_null", "Pru_boot", "Pru_on", "Pru_alert", "Pru_error"
 	};
 	static char *charge_type[] = {
 		"Unknown", "N/A", "Trickle", "Fast"
 	};
 	static char *health_text[] = {
 		"Unknown", "Good", "Overheat", "Dead", "Over voltage",
-		"Unspecified failure", "Cold", "Watchdog timer expire",
-		"Safety timer expire"
+		"Over current", "Unspecified failure", "Cold",
+		"Watchdog timer expire", "Safety timer expire"
 	};
 	static char *technology_text[] = {
 		"Unknown", "NiMH", "Li-ion", "Li-poly", "LiFe", "NiCd",
@@ -104,8 +106,12 @@ static ssize_t power_supply_show_property(struct device *dev,
 		return sprintf(buf, "%s\n", scope_text[value.intval]);
 	else if (off >= POWER_SUPPLY_PROP_MODEL_NAME)
 		return sprintf(buf, "%s\n", value.strval);
-
-	return sprintf(buf, "%d\n", value.intval);
+	else if (off == POWER_SUPPLY_PROP_CHARGE_COUNTER_EXT)
+		return sprintf(buf, "%lld\n", value.int64val);
+	else if (!power_supply_is_string_property(off))
+		return sprintf(buf, "%d\n", value.intval);
+	else
+		return sprintf(buf, "%s\n", value.strval);
 }
 
 static ssize_t power_supply_store_property(struct device *dev,
@@ -118,12 +124,15 @@ static ssize_t power_supply_store_property(struct device *dev,
 	long long_val;
 
 	/* TODO: support other types than int */
-	ret = kstrtol(buf, 10, &long_val);
-	if (ret < 0)
-		return ret;
 
-	value.intval = long_val;
-
+	if (!power_supply_is_string_property(off)) {
+		ret = kstrtol(buf, 10, &long_val);
+		if (ret < 0)
+			return ret;
+		value.intval = long_val;
+	} else {
+		value.strval = buf;
+	}
 	ret = psy->set_property(psy, off, &value);
 	if (ret < 0)
 		return ret;
@@ -165,8 +174,14 @@ static struct device_attribute power_supply_attrs[] = {
 	POWER_SUPPLY_ATTR(constant_charge_current_max),
 	POWER_SUPPLY_ATTR(constant_charge_voltage),
 	POWER_SUPPLY_ATTR(constant_charge_voltage_max),
+	POWER_SUPPLY_ATTR(charge_current_limit),
 	POWER_SUPPLY_ATTR(charge_control_limit),
 	POWER_SUPPLY_ATTR(charge_control_limit_max),
+	POWER_SUPPLY_ATTR(charge_current),
+	POWER_SUPPLY_ATTR(max_charge_current),
+	POWER_SUPPLY_ATTR(charge_voltage),
+	POWER_SUPPLY_ATTR(max_charge_voltage),
+	POWER_SUPPLY_ATTR(input_cur_limit),
 	POWER_SUPPLY_ATTR(energy_full_design),
 	POWER_SUPPLY_ATTR(energy_empty_design),
 	POWER_SUPPLY_ATTR(energy_full),
@@ -180,6 +195,8 @@ static struct device_attribute power_supply_attrs[] = {
 	POWER_SUPPLY_ATTR(temp),
 	POWER_SUPPLY_ATTR(temp_alert_min),
 	POWER_SUPPLY_ATTR(temp_alert_max),
+	POWER_SUPPLY_ATTR(max_temp),
+	POWER_SUPPLY_ATTR(min_temp),
 	POWER_SUPPLY_ATTR(temp_ambient),
 	POWER_SUPPLY_ATTR(temp_ambient_alert_min),
 	POWER_SUPPLY_ATTR(temp_ambient_alert_max),
@@ -188,7 +205,35 @@ static struct device_attribute power_supply_attrs[] = {
 	POWER_SUPPLY_ATTR(time_to_full_now),
 	POWER_SUPPLY_ATTR(time_to_full_avg),
 	POWER_SUPPLY_ATTR(type),
+	POWER_SUPPLY_ATTR(charge_term_cur),
+	POWER_SUPPLY_ATTR(enable_charging),
+	POWER_SUPPLY_ATTR(enable_charger),
+	POWER_SUPPLY_ATTR(cable_type),
+	POWER_SUPPLY_ATTR(priority),
 	POWER_SUPPLY_ATTR(scope),
+	/* Local extensions */
+	POWER_SUPPLY_ATTR(usb_hc),
+	POWER_SUPPLY_ATTR(usb_otg),
+	POWER_SUPPLY_ATTR(charge_enabled),
+	/* Local extensions of type int64_t */
+	POWER_SUPPLY_ATTR(charge_counter_ext),
+	/* Wireless charging */
+	POWER_SUPPLY_ATTR(vrect),
+	POWER_SUPPLY_ATTR(irect),
+	POWER_SUPPLY_ATTR(vdcout),
+	POWER_SUPPLY_ATTR(idcout),
+	POWER_SUPPLY_ATTR(pru_temp),
+	POWER_SUPPLY_ATTR(pru_dcen),
+	POWER_SUPPLY_ATTR(vrect_min_dyn),
+	POWER_SUPPLY_ATTR(vrect_set_dyn),
+	POWER_SUPPLY_ATTR(vrect_high_dyn),
+	POWER_SUPPLY_ATTR(pru_dynamic_param),
+	POWER_SUPPLY_ATTR(pru_static_param),
+	POWER_SUPPLY_ATTR(ptu_static_param),
+	POWER_SUPPLY_ATTR(ptu_power),
+	POWER_SUPPLY_ATTR(ptu_max_src_impedance),
+	POWER_SUPPLY_ATTR(ptu_max_load_resistance),
+	POWER_SUPPLY_ATTR(ptu_class),
 	/* Properties of type `const char *' */
 	POWER_SUPPLY_ATTR(model_name),
 	POWER_SUPPLY_ATTR(manufacturer),

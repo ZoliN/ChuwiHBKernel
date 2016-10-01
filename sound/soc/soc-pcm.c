@@ -463,6 +463,7 @@ static int soc_pcm_close(struct snd_pcm_substream *substream)
 
 	mutex_lock_nested(&rtd->pcm_mutex, rtd->pcm_subclass);
 
+	mutex_lock_nested(&rtd->card->dapm_mutex, SND_SOC_DAPM_CLASS_RUNTIME);
 	if (substream->stream == SNDRV_PCM_STREAM_PLAYBACK) {
 		cpu_dai->playback_active--;
 		codec_dai->playback_active--;
@@ -482,6 +483,8 @@ static int soc_pcm_close(struct snd_pcm_substream *substream)
 	if (!codec_dai->active)
 		codec_dai->rate = 0;
 
+	snd_soc_dai_digital_mute(cpu_dai, 1, substream->stream);
+
 	if (cpu_dai->driver->ops->shutdown)
 		cpu_dai->driver->ops->shutdown(substream, cpu_dai);
 
@@ -494,6 +497,7 @@ static int soc_pcm_close(struct snd_pcm_substream *substream)
 	if (platform->driver->ops && platform->driver->ops->close)
 		platform->driver->ops->close(substream);
 	cpu_dai->runtime = NULL;
+	mutex_unlock(&rtd->card->dapm_mutex);
 
 	if (substream->stream == SNDRV_PCM_STREAM_PLAYBACK) {
 		if (!rtd->pmdown_time || codec->ignore_pmdown_time ||
@@ -590,6 +594,7 @@ static int soc_pcm_prepare(struct snd_pcm_substream *substream)
 			SND_SOC_DAPM_STREAM_START);
 
 	snd_soc_dai_digital_mute(codec_dai, 0, substream->stream);
+	snd_soc_dai_digital_mute(cpu_dai, 0, substream->stream);
 
 out:
 	mutex_unlock(&rtd->pcm_mutex);
@@ -1348,7 +1353,6 @@ int dpcm_be_dai_shutdown(struct snd_soc_pcm_runtime *fe, int stream)
 
 		dev_dbg(be->dev, "ASoC: close BE %s\n",
 			dpcm->fe->dai_link->name);
-
 		soc_pcm_close(be_substream);
 		be_substream->runtime = NULL;
 
@@ -2178,15 +2182,37 @@ int soc_new_pcm(struct snd_soc_pcm_runtime *rtd, int num)
 	int ret = 0, playback = 0, capture = 0;
 
 	if (rtd->dai_link->dynamic || rtd->dai_link->no_pcm) {
-		playback = rtd->dai_link->dpcm_playback;
-		capture = rtd->dai_link->dpcm_capture;
+
+		if ((cpu_dai->driver->playback.channels_min) &&
+			(cpu_dai->driver->capture.channels_min)) {
+				if (rtd->dai_link->playback_count)
+					playback = rtd->dai_link->playback_count;
+				else
+					playback = 1;
+
+				if (rtd->dai_link->capture_count)
+					capture = rtd->dai_link->capture_count;
+				else
+					capture = 1;
+		} else {
+			playback = rtd->dai_link->dpcm_playback;
+			capture = rtd->dai_link->dpcm_capture;
+		}
+
 	} else {
 		if (codec_dai->driver->playback.channels_min &&
 		    cpu_dai->driver->playback.channels_min)
-			playback = 1;
+			if (rtd->dai_link->playback_count)
+				playback = rtd->dai_link->playback_count;
+			else
+				playback = 1;
 		if (codec_dai->driver->capture.channels_min &&
-		    cpu_dai->driver->capture.channels_min)
-			capture = 1;
+		    cpu_dai->driver->capture.channels_min) {
+			if (rtd->dai_link->capture_count)
+				capture = rtd->dai_link->capture_count;
+			else
+				capture = 1;
+		}
 	}
 
 	if (rtd->dai_link->playback_only) {

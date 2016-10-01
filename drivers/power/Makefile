@@ -1,12 +1,15 @@
 ccflags-$(CONFIG_POWER_SUPPLY_DEBUG) := -DDEBUG
 
-power_supply-y				:= power_supply_core.o
-power_supply-$(CONFIG_SYSFS)		+= power_supply_sysfs.o
-power_supply-$(CONFIG_LEDS_TRIGGERS)	+= power_supply_leds.o
+power_supply-y					:= power_supply_core.o
+power_supply-$(CONFIG_SYSFS)			+= power_supply_sysfs.o
+power_supply-$(CONFIG_LEDS_TRIGGERS)		+= power_supply_leds.o
+power_supply-$(CONFIG_POWER_SUPPLY_CHARGER)	+= power_supply_charger.o
+power_supply-$(CONFIG_POWER_SUPPLY_BATTID)	+= battery_id.o
 
 obj-$(CONFIG_POWER_SUPPLY)	+= power_supply.o
 obj-$(CONFIG_GENERIC_ADC_BATTERY)	+= generic-adc-battery.o
 
+obj-$(CONFIG_POWER_SUPPLY_CHARGING_ALGO_PSE)	+= charging_algo_pse.o
 obj-$(CONFIG_PDA_POWER)		+= pda_power.o
 obj-$(CONFIG_APM_POWER)		+= apm_power.o
 obj-$(CONFIG_MAX8925_POWER)	+= max8925_power.o
@@ -58,3 +61,13 @@ obj-$(CONFIG_POWER_AVS)		+= avs/
 obj-$(CONFIG_CHARGER_SMB347)	+= smb347-charger.o
 obj-$(CONFIG_CHARGER_TPS65090)	+= tps65090-charger.o
 obj-$(CONFIG_POWER_RESET)	+= reset/
+obj-$(CONFIG_DC_XPWR_BATTERY)	+= dc_xpwr_battery.o
+obj-$(CONFIG_DC_XPWR_CHARGER)	+= dc_xpwr_charger.o
+obj-$(CONFIG_CHARGER_BQ24192)	+= bq24192_charger.o
+obj-$(CONFIG_INTEL_FUEL_GAUGE)	+= intel_fuel_gauge.o
+obj-$(CONFIG_INTEL_FG_UIFACE)	+= intel_fg_uiface.o
+obj-$(CONFIG_INTEL_SOC_PMIC) 	+= intel_pmic_ccsm.o
+obj-$(CONFIG_WIRELESS_REZENCE)	+= wireless_rezence.o
+obj-$(CONFIG_REZENCE_NX2A4WP)	+= wireless_nx2a4wp.o
+obj-$(CONFIG_CHARGER_BQ24261) 	+= bq24261_charger.o
+obj-$(CONFIG_BLE_GPIO) 		+= ble_gpio.o

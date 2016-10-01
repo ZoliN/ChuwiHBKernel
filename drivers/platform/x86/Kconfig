@@ -827,4 +827,60 @@ config INTEL_BAYTRAIL_MBI
 	  Interface. This is a requirement for systems that need to configure
 	  the PUNIT for power management features such as RAPL.
 
+config INTEL_WARN_INT
+	tristate "TCO Watchdog warning interrupt"
+	depends on ITCO_WDT
+	---help---
+	  This driver provides support for TCO watchdog warning interrupt.
+	  Upon first expiration of the TCO watchdog, a warning interrupt is
+	  fired and the driver calls panic() function to dump debug information
+	  (registers and call stacks).
+	  At the same time, the TCO watchdog reloads with 4 seconds timeout
+	  value and runs till the second expiration. At the second expiration of
+	  the TCO watchdog, the platform resets (the dump is supposed to last less
+	  than 4 seconds).
+
+config INTEL_GPIO_HSIC
+	tristate "Intel HSIC GPIO support"
+	depends on ACPI && USB && GPIOLIB
+	---help---
+	  On some Intel USB controllers, some USB ports are connected to HSIC
+	  PHYs. And HSIC PHY disconnect and remote wakeup are supported by two
+	  gpios.
+
+config INTEL_GPIO_SSIC
+	tristate "Intel SSIC GPIO support"
+	default y
+	depends on ACPI && USB && GPIOLIB
+	---help---
+	  On some Intel USB controllers, some USB ports are connected to SSIC
+	  PHYs. This config flag enables the sideband wakeup functionality for
+	  the Intel SSIC modem. In other words, the modem can be woken up by
+	  toggling a specific GPIO pin (in this case HSIC_AUX1).
+
+	  Set to default Y, as the functionality is crucial for the modem.
+
+config INTEL_PSTORE_PRAM
+	tristate "Intel pstore RAM backend driver (PRAM BIOS feature)"
+	depends on ACPI
+	depends on PSTORE_RAM
+	---help---
+	  This driver provides RAM backend for pstore, managed by BIOS
+	  as PRAM (Persisted RAM buffer) debug feature.
+
+	  PRAM BIOS feature is configurable through BIOS setup or PRAM_Conf
+	  EFI variable (GUID ecb54cd9-e5ae-4fdc-a971-e877756068f7).
+	  Accepted values for variable are 0, 1, 2 and 3 as ASCII
+	  string; will configure PRAM feature respectively as
+	  Disabled, 4 MB, 16 MB and 64 MB.
+
+	  Safe to say Y, will not bind if your BIOS doesn't support
+	  this feature.
+
+config INTEL_TASKS_DUMP
+	bool "Intel panic tasks dumper"
+	depends on PRINTK
+	---help---
+	  This provides a way to get full tasks dump in case of panic.
+
 endif # X86_PLATFORM_DEVICES

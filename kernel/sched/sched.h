@@ -512,6 +512,13 @@ struct root_domain {
 
 extern struct root_domain def_root_domain;
 
+struct cpu_concurrency_t {
+	struct sched_avg avg;
+	int unload;
+	int dst_cpu;
+	struct cpu_stop_work unload_work;
+};
+
 #endif /* CONFIG_SMP */
 
 /*
@@ -600,6 +607,8 @@ struct rq {
 
 	struct list_head cfs_tasks;
 
+	struct cpu_concurrency_t concurrency;
+
 	u64 rt_avg;
 	u64 age_stamp;
 	u64 idle_stamp;
@@ -652,8 +661,6 @@ struct rq {
 #ifdef CONFIG_SMP
 	struct llist_head wake_list;
 #endif
-
-	struct sched_avg avg;
 };
 
 static inline int cpu_of(struct rq *rq)
@@ -729,16 +736,22 @@ queue_balance_callback(struct rq *rq,
  *		be returned.
  * @flag:	The flag to check for the highest sched_domain
  *		for the given cpu.
+ * @all:	The flag is contained by all sched_domains from the hightest down
  *
  * Returns the highest sched_domain of a cpu which contains the given flag.
  */
-static inline struct sched_domain *highest_flag_domain(int cpu, int flag)
+static inline struct
+sched_domain *highest_flag_domain(int cpu, int flag, int all)
 {
 	struct sched_domain *sd, *hsd = NULL;
 
 	for_each_domain(cpu, sd) {
-		if (!(sd->flags & flag))
-			break;
+		if (!(sd->flags & flag)) {
+			if (all)
+				break;
+			else
+				continue;
+		}
 		hsd = sd;
 	}
 
@@ -763,6 +776,7 @@ DECLARE_PER_CPU(int, sd_llc_id);
 DECLARE_PER_CPU(struct sched_domain *, sd_numa);
 DECLARE_PER_CPU(struct sched_domain *, sd_busy);
 DECLARE_PER_CPU(struct sched_domain *, sd_asym);
+DECLARE_PER_CPU(struct sched_domain *, sd_wc);
 
 struct sched_group_power {
 	atomic_t ref;
@@ -1196,11 +1210,21 @@ extern void idle_balance(int this_cpu, struct rq *this_rq);
 extern void idle_enter_fair(struct rq *this_rq);
 extern void idle_exit_fair(struct rq *this_rq);
 
+extern void update_cpu_concurrency(struct rq *rq);
+extern void init_workload_consolidation(struct rq *rq);
+extern void wc_nonshielded_mask(struct sched_domain *sd, struct cpumask *mask);
+extern int wc_cpu_shielded(int cpu);
+
 #else	/* CONFIG_SMP */
 
 static inline void idle_balance(int cpu, struct rq *rq)
 {
 }
+
+static inline void update_cpu_concurrency(struct rq *rq) {}
+static inline void init_workload_consolidation(struct rq *rq) {}
+static inline void wc_nonshielded_mask(struct sched_domain *sd, struct cpumask *mask) {}
+static inline int wc_cpu_shielded(struct sched_domain *sd) {}
 
 #endif
 

@@ -11,6 +11,8 @@
 * GNU General Public License for more details.
 */
 
+#include <linux/gpio/consumer.h>
+#include <linux/gpio.h>
 #include "inv_mpu_iio.h"
 
 static void inv_scan_query(struct iio_dev *indio_dev)
@@ -115,6 +117,8 @@ int inv_mpu6050_probe_trigger(struct iio_dev *indio_dev)
 {
 	int ret;
 	struct inv_mpu6050_state *st = iio_priv(indio_dev);
+	struct gpio_desc *gpiod;
+	struct device *dev = &st->client->dev;
 
 	st->trig = iio_trigger_alloc("%s-dev%d",
 					indio_dev->name,
@@ -123,12 +127,24 @@ int inv_mpu6050_probe_trigger(struct iio_dev *indio_dev)
 		ret = -ENOMEM;
 		goto error_ret;
 	}
-	ret = request_irq(st->client->irq, &iio_trigger_generic_data_rdy_poll,
-				IRQF_TRIGGER_RISING,
+
+	/* Get interrupt GPIO pin number */
+	gpiod = devm_gpiod_get_index(dev, "inv_mup6050_gpio_int", 0);
+	if (!IS_ERR(gpiod)) {
+		gpiod_direction_input(gpiod);
+		st->client->irq = gpiod_to_irq(gpiod);
+		st->gpiod = gpiod;
+	}
+
+	ret = request_threaded_irq(st->client->irq, inv_mpu6050_irq_handler,
+				inv_mpu6050_read_fifo,
+				IRQF_TRIGGER_RISING | IRQF_ONESHOT,
 				"inv_mpu",
-				st->trig);
+				indio_dev
+				);
 	if (ret)
 		goto error_free_trig;
+
 	st->trig->dev.parent = &st->client->dev;
 	st->trig->ops = &inv_mpu_trigger_ops;
 	iio_trigger_set_drvdata(st->trig, indio_dev);
@@ -147,9 +163,11 @@ error_ret:
 	return ret;
 }
 
-void inv_mpu6050_remove_trigger(struct inv_mpu6050_state *st)
+void inv_mpu6050_remove_trigger(struct iio_dev *indio_dev)
 {
+	struct inv_mpu6050_state *st = iio_priv(indio_dev);
+
 	iio_trigger_unregister(st->trig);
-	free_irq(st->client->irq, st->trig);
+	free_irq(st->client->irq, indio_dev);
 	iio_trigger_free(st->trig);
 }

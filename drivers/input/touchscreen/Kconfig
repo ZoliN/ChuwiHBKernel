@@ -92,6 +92,9 @@ config TOUCHSCREEN_ATMEL_MXT
 	help
 	  Say Y here if you have Atmel mXT series I2C touchscreen,
 	  such as AT42QT602240/ATMXT224, connected to your system.
+          update driver to https://github.com/atmel-maxtouch/linux/
+          tree/maxtouch-v3.14, which support 4th generation touch
+          chip, such as mxt1664T.
 
 	  If unsure, say N.
 
@@ -304,6 +307,18 @@ config TOUCHSCREEN_S3C2410
 
 	  To compile this driver as a module, choose M here: the
 	  module will be called s3c2410_ts.
+
+config TOUCHSCREEN_GT9XX
+	tristate "Goodix GT911 touchscreen"
+	select SERIO
+	help
+	  Say Y here if you have the Goodix GT911 touchscreen connected to
+	  your system.
+
+	  If unsure, say N.
+
+	  To compile this driver as a module, choose M here: the
+	  module will be called gt9xx.
 
 config TOUCHSCREEN_GUNZE
 	tristate "Gunze AHL-51S touchscreen"
@@ -884,6 +899,18 @@ config TOUCHSCREEN_PCAP
 	  To compile this driver as a module, choose M here: the
 	  module will be called pcap_ts.
 
+config TOUCHSCREEN_SILEAD
+	tristate "Silead I2C touchscreen"
+	depends on I2C
+	help
+	  Say Y here if you have the Silead touchscreen connected to
+	  your system.
+
+	  If unsure, say N.
+
+	  To compile this driver as a module, choose M here: the
+	  module will be called silead.
+
 config TOUCHSCREEN_ST1232
 	tristate "Sitronix ST1232 touchscreen controllers"
 	depends on I2C
@@ -943,4 +970,18 @@ config TOUCHSCREEN_ZFORCE
 	  To compile this driver as a module, choose M here: the
 	  module will be called zforce_ts.
 
+config TOUCHSCREEN_FOCALTECH_FT5X06
+	tristate "FOCALTECH FT5X06 touchscreen"
+	depends on I2C
+	default n
+	help
+	  Say Y here if you have a FocalTech ft5x06 series
+	  touchscreen chip.
+
+	  If unsure, say N.
+
+	  To compile this driver as a module, Choose M here: the
+	  module will be called ft5x06_ts.
+
+source "drivers/input/touchscreen/synaptics_dsx/Kconfig"
 endif

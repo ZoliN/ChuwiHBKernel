@@ -8,8 +8,10 @@ struct task_struct;
 
 struct mmc_blk_request {
 	struct mmc_request	mrq;
-	struct mmc_command	sbc;
+	struct mmc_command	precmd;
 	struct mmc_command	cmd;
+	struct mmc_command	cmd2;
+	struct mmc_command	postcmd;
 	struct mmc_command	stop;
 	struct mmc_data		data;
 };
@@ -41,6 +43,7 @@ struct mmc_queue_req {
 	struct mmc_async_req	mmc_active;
 	enum mmc_packed_type	cmd_type;
 	struct mmc_packed	*packed;
+	int task_id;
 };
 
 struct mmc_queue {
@@ -49,14 +52,15 @@ struct mmc_queue {
 	struct semaphore	thread_sem;
 	unsigned int		flags;
 #define MMC_QUEUE_SUSPENDED	(1 << 0)
-#define MMC_QUEUE_NEW_REQUEST	(1 << 1)
 
-	int			(*issue_fn)(struct mmc_queue *, struct request *);
+	int	(*issue_fn)(struct mmc_queue *, struct request *, bool);
 	void			*data;
 	struct request_queue	*queue;
-	struct mmc_queue_req	mqrq[2];
+	struct mmc_queue_req	*mqrq;
 	struct mmc_queue_req	*mqrq_cur;
-	struct mmc_queue_req	*mqrq_prev;
+	unsigned long		cmdqslot;
+	unsigned long		qdepth;
+	atomic_t		active_slots;
 };
 
 extern int mmc_init_queue(struct mmc_queue *, struct mmc_card *, spinlock_t *,

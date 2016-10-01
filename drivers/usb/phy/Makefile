@@ -4,6 +4,7 @@
 obj-$(CONFIG_USB_PHY)			+= phy.o
 obj-$(CONFIG_OF)			+= of.o
 obj-$(CONFIG_USB_OTG_FSM)		+= phy-fsm-usb.o
+obj-$(CONFIG_USB_OTG_WAKELOCK)		+= otg-wakelock.o
 
 # transceiver drivers, keep the list sorted
 
@@ -33,3 +34,4 @@ obj-$(CONFIG_USB_RCAR_GEN2_PHY)		+= phy-rcar-gen2-usb.o
 obj-$(CONFIG_USB_ULPI)			+= phy-ulpi.o
 obj-$(CONFIG_USB_ULPI_VIEWPORT)		+= phy-ulpi-viewport.o
 obj-$(CONFIG_KEYSTONE_USB_PHY)		+= phy-keystone.o
+obj-$(CONFIG_INTEL_CHT_PHY)		+= phy-intel-cht.o

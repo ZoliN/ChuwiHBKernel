@@ -73,9 +73,6 @@
 // us (it polls at HZ/4 usually) before we report too many false errors.
 #define THROTTLE_JIFFIES	(HZ/8)
 
-// between wakeups
-#define UNLINK_TIMEOUT_MS	3
-
 /*-------------------------------------------------------------------------*/
 
 // randomly generated ethernet address
@@ -190,6 +187,14 @@ static void intr_complete (struct urb *urb)
 
 	/* software-driven interface shutdown */
 	case -ENOENT:		/* urb killed */
+		if (urb->actual_length) {
+			netdev_dbg(dev->net,
+				"intr status %d\, length: %dn",
+				status, urb->actual_length);
+			dev->driver_info->status(dev, urb);
+		}
+		break;
+
 	case -ESHUTDOWN:	/* hardware gone */
 		netif_dbg(dev, ifdown, dev->net,
 			  "intr shutdown, code %d\n", status);
@@ -589,7 +594,27 @@ static void rx_complete (struct urb *urb)
 		// FALLTHROUGH
 
 	/* software-driven interface shutdown */
+	case -ENOENT:		/* urb killed */
 	case -ECONNRESET:		/* async unlink */
+		if (urb->actual_length) {
+			if (skb->len < dev->net->hard_header_len) {
+				state = rx_cleanup;
+				dev->net->stats.rx_errors++;
+				dev->net->stats.rx_length_errors++;
+				netif_dbg(dev, rx_err, dev->net,
+					  "rx length %d\n", skb->len);
+			}
+			netif_dbg(dev, ifdown, dev->net,
+				  "rx length in async unlink: %d\n",
+					urb->actual_length);
+		} else {
+			netif_dbg(dev, ifdown, dev->net,
+				  "rx async unlink, code %d\n",
+					urb_status);
+			goto block;
+		}
+		break;
+
 	case -ESHUTDOWN:		/* hardware gone */
 		netif_dbg(dev, ifdown, dev->net,
 			  "rx shutdown, code %d\n", urb_status);
@@ -765,7 +790,7 @@ static void usbnet_terminate_urbs(struct usbnet *dev)
 	while (!skb_queue_empty(&dev->rxq)
 		&& !skb_queue_empty(&dev->txq)
 		&& !skb_queue_empty(&dev->done)) {
-			schedule_timeout(msecs_to_jiffies(UNLINK_TIMEOUT_MS));
+			schedule();
 			set_current_state(TASK_UNINTERRUPTIBLE);
 			netif_dbg(dev, ifdown, dev->net,
 				  "waited for %d urb completions\n", temp);

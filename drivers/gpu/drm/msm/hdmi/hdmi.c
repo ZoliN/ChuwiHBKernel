@@ -65,7 +65,7 @@ void hdmi_destroy(struct kref *kref)
 	if (hdmi->i2c)
 		hdmi_i2c_destroy(hdmi->i2c);
 
-	put_device(&hdmi->pdev->dev);
+	platform_set_drvdata(hdmi->pdev, NULL);
 }
 
 /* initialize connector */
@@ -97,6 +97,8 @@ struct hdmi *hdmi_init(struct drm_device *dev, struct drm_encoder *encoder)
 	hdmi->pdev = pdev;
 	hdmi->config = config;
 	hdmi->encoder = encoder;
+
+	hdmi_audio_infoframe_init(&hdmi->audio.infoframe);
 
 	/* not sure about which phy maps to which msm.. probably I miss some */
 	if (config->phy_init)
@@ -224,6 +226,8 @@ struct hdmi *hdmi_init(struct drm_device *dev, struct drm_encoder *encoder)
 	priv->bridges[priv->num_bridges++]       = hdmi->bridge;
 	priv->connectors[priv->num_connectors++] = hdmi->connector;
 
+	platform_set_drvdata(pdev, hdmi);
+
 	return hdmi;
 
 fail:
@@ -273,6 +277,7 @@ static int hdmi_bind(struct device *dev, struct device *master, void *data)
 	static const char *hpd_reg_names[] = {"hpd-gdsc", "hpd-5v"};
 	static const char *pwr_reg_names[] = {"core-vdda", "core-vcc"};
 	static const char *hpd_clk_names[] = {"iface_clk", "core_clk", "mdp_core_clk"};
+	static unsigned long hpd_clk_freq[] = {0, 19200000, 0};
 	static const char *pwr_clk_names[] = {"extp_clk", "alt_iface_clk"};
 
 	config.phy_init      = hdmi_phy_8x74_init;
@@ -282,6 +287,7 @@ static int hdmi_bind(struct device *dev, struct device *master, void *data)
 	config.pwr_reg_names = pwr_reg_names;
 	config.pwr_reg_cnt   = ARRAY_SIZE(pwr_reg_names);
 	config.hpd_clk_names = hpd_clk_names;
+	config.hpd_freq      = hpd_clk_freq;
 	config.hpd_clk_cnt   = ARRAY_SIZE(hpd_clk_names);
 	config.pwr_clk_names = pwr_clk_names;
 	config.pwr_clk_cnt   = ARRAY_SIZE(pwr_clk_names);
@@ -308,7 +314,7 @@ static int hdmi_bind(struct device *dev, struct device *master, void *data)
 		config.ddc_data_gpio = 71;
 		config.hpd_gpio      = 72;
 		config.mux_en_gpio   = -1;
-		config.mux_sel_gpio  = 13 + NR_GPIO_IRQS;
+		config.mux_sel_gpio  = -1;
 	} else if (cpu_is_msm8960() || cpu_is_msm8960ab()) {
 		static const char *hpd_reg_names[] = {"8921_hdmi_mvs"};
 		config.phy_init      = hdmi_phy_8960_init;

@@ -30,6 +30,13 @@ config DRM_USB
 	depends on USB_SUPPORT && USB_ARCH_HAS_HCD
 	select USB
 
+config NO_GPU_AUTHENTICATION
+	bool "Disable GPU authentication"
+	depends on DRM
+	default n
+	help
+	  Choose this option if you want to disable GPU authentication.
+
 config DRM_KMS_HELPER
 	tristate
 	depends on DRM
@@ -82,6 +89,8 @@ config DRM_KMS_CMA_HELPER
 	  Choose this if you need the KMS CMA helper functions
 
 source "drivers/gpu/drm/i2c/Kconfig"
+
+source "drivers/gpu/drm/bridge/Kconfig"
 
 config DRM_TDFX
 	tristate "3dfx Banshee/Voodoo3+"

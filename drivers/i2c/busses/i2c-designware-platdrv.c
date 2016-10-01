@@ -42,7 +42,13 @@
 #include <linux/io.h>
 #include <linux/slab.h>
 #include <linux/acpi.h>
+
+#include <acpi/actypes.h>
 #include "i2c-designware-core.h"
+
+#include <asm/intel_mid_pcihelpers.h>
+
+#define I2C_TRAN_HDR_SIZE	2
 
 static struct i2c_algorithm i2c_dw_algo = {
 	.master_xfer	= i2c_dw_xfer,
@@ -69,6 +75,156 @@ static const struct dmi_system_id dw_i2c_no_acpi_params[] = {
 	},
 	{ }
 };
+
+struct dw_i2c_acpi_handler_data {
+	struct acpi_connection_info info;
+	struct platform_device *pdev;
+};
+
+
+int dw_i2c_acquire_ownership(void)
+{
+#ifdef CONFIG_GMIN_INTEL_MID
+	return intel_mid_dw_i2c_acquire_ownership();
+#endif
+	return 0;
+}
+int dw_i2c_release_ownership(void)
+{
+#ifdef CONFIG_GMIN_INTEL_MID
+	return intel_mid_dw_i2c_release_ownership();
+#endif
+	return 0;
+}
+static acpi_status
+dw_i2c_acpi_space_handler(u32 function, acpi_physical_address address,
+			u32 bits, u64 *value64,
+			void *handler_context, void *region_context)
+{
+	struct dw_i2c_acpi_handler_data *data = handler_context;
+	struct acpi_connection_info *info = &data->info;
+	struct dw_i2c_dev *dev = platform_get_drvdata(data->pdev);
+	struct acpi_resource_i2c_serialbus *sb;
+	struct acpi_resource *ares;
+	u8 target;
+	int ret, length;
+	u8 *value = (u8 *)value64;
+	u8 *buffer;
+	u32 accessor_type = function >> 16;
+	u8 addr = (u8)address;
+	acpi_status status;
+	struct i2c_msg msgs[2];
+
+	status = acpi_buffer_to_resource(info->connection, info->length, &ares);
+
+	if (ACPI_FAILURE(status))
+		return status;
+
+	if (ares->type != ACPI_RESOURCE_TYPE_SERIAL_BUS) {
+		ACPI_FREE(ares);
+		return AE_BAD_PARAMETER;
+	}
+
+	sb = &ares->data.i2c_serial_bus;
+	if (sb->type != ACPI_RESOURCE_SERIAL_TYPE_I2C) {
+		ACPI_FREE(ares);
+		return AE_BAD_PARAMETER;
+	}
+
+	pr_debug("%s: Found I2C Resource type, addr %d\n",
+				__func__, sb->slave_address);
+	target = sb->slave_address;
+
+	length = acpi_get_serial_access_length(accessor_type, info->access_length);
+	pr_debug("%s: access opeation region, addr 0x%x operation %d len %d\n",
+		__func__, addr, function, length);
+
+	if (!value64) {
+		ACPI_FREE(ares);
+		return AE_BAD_PARAMETER;
+	}
+	if (length <= I2C_TRAN_HDR_SIZE) {
+		ACPI_FREE(ares);
+		return AE_OK;
+	}
+
+	function &= ACPI_IO_MASK; 
+	if (function == ACPI_READ) {
+		buffer = kzalloc(length, GFP_KERNEL);
+		if (!buffer) {
+			pr_info("%s: buffer allocation failed!\n", __func__);
+			ACPI_FREE(ares);
+			return AE_NO_MEMORY;
+		}
+
+		msgs[0].addr = target;
+		msgs[0].flags = 0;
+		msgs[0].len = 1;
+		msgs[0].buf = &addr;
+	
+		msgs[1].addr = target;
+		msgs[1].flags = I2C_M_RD;
+		msgs[1].len = length;
+		msgs[1].buf = buffer;
+	
+		ret = i2c_transfer(&dev->adapter, msgs, 2);
+		if (ret < 0) {
+			pr_info("%s: i2c read failed\n", __func__);	
+			return AE_ERROR;		
+		}
+	
+		memcpy(value + 2, buffer, length - I2C_TRAN_HDR_SIZE);
+		value[0] = value[1] = 0;
+		kfree(buffer);
+	} else if (function == ACPI_WRITE) {
+//		buffer = kzalloc(length - 1, GFP_KERNEL);
+//		
+//		buffer[0] = addr;
+//		memcpy(buffer + 1, value + 2, length - 2);
+//		msgs[0].addr = target;
+//		msgs[0].flags = 0;
+//		msgs[0].len = length - 1;
+//		msgs[0].buf = buffer;
+//
+//		ret = i2c_transfer(&dev->adapter, msgs, 2);
+//		if (ret < 0) {
+//			pr_info("%s: i2c read failed\n", __func__);	
+//			return AE_ERROR;		
+//		}
+//		kfree(buffer);
+//
+	}
+
+	ACPI_FREE(ares);
+	return AE_OK;
+}
+
+static int dw_i2c_acpi_install_space_handler(struct platform_device *pdev)
+{
+	struct acpi_device *adev = ACPI_COMPANION(&pdev->dev);
+	struct dw_i2c_acpi_handler_data *data;
+	acpi_status status;
+
+	if (!adev)
+		return -EFAULT;
+
+	data = devm_kzalloc(&pdev->dev, sizeof(struct dw_i2c_acpi_handler_data),
+			    GFP_KERNEL);
+
+	if(!data)
+		return -ENOMEM;
+
+	data->pdev = pdev;
+	status = acpi_install_address_space_handler(adev->handle,
+				ACPI_ADR_SPACE_GSBUS,
+				&dw_i2c_acpi_space_handler,
+				NULL,
+				data);
+	if (ACPI_FAILURE(status))
+		return -EFAULT;
+	return 0;
+}
+
 
 static void dw_i2c_acpi_params(struct platform_device *pdev, char method[],
 			       u16 *hcnt, u16 *lcnt, u32 *sda_hold)
@@ -100,6 +256,9 @@ static int dw_i2c_acpi_configure(struct platform_device *pdev)
 {
 	struct dw_i2c_dev *dev = platform_get_drvdata(pdev);
 	bool fs_mode = dev->master_cfg & DW_IC_CON_SPEED_FAST;
+	acpi_status status;
+	acpi_handle handle = ACPI_HANDLE(&pdev->dev);
+	unsigned long long shared_host = 0;
 
 	if (!ACPI_HANDLE(&pdev->dev))
 		return -ENODEV;
@@ -117,6 +276,19 @@ static int dw_i2c_acpi_configure(struct platform_device *pdev)
 	dw_i2c_acpi_params(pdev, "FMCN", &dev->fs_hcnt, &dev->fs_lcnt,
 			   fs_mode ? &dev->sda_hold_time : NULL);
 
+	status = acpi_evaluate_integer(handle, "_SEM", NULL, &shared_host);
+
+	if (ACPI_SUCCESS(status))
+		dev_info(&pdev->dev, "_SEM=%ld\n", shared_host);
+
+	if (shared_host != 0) {
+		dev_info(&pdev->dev, "Share controller with PUNIT\n");
+		dev->shared_host = 1;
+		dev->polling = 1;
+		dev->acquire_ownership = dw_i2c_acquire_ownership;
+		dev->release_ownership = dw_i2c_release_ownership;
+	}
+
 	return 0;
 }
 
@@ -126,6 +298,7 @@ static const struct acpi_device_id dw_i2c_acpi_match[] = {
 	{ "INT3432", 0 },
 	{ "INT3433", 0 },
 	{ "80860F41", 0 },
+	{ "808622C1", 0 },
 	{ }
 };
 MODULE_DEVICE_TABLE(acpi, dw_i2c_acpi_match);
@@ -170,6 +343,7 @@ static int dw_i2c_probe(struct platform_device *pdev)
 	if (IS_ERR(dev->clk))
 		return PTR_ERR(dev->clk);
 	clk_prepare_enable(dev->clk);
+	dev->clk_rate_khz = dev->get_clk_rate_khz(dev);
 
 	if (pdev->dev.of_node) {
 		u32 ht = 0;
@@ -200,16 +374,35 @@ static int dw_i2c_probe(struct platform_device *pdev)
 		dev->rx_fifo_depth = ((param1 >> 8)  & 0xff) + 1;
 		dev->adapter.nr = pdev->id;
 	}
+
+	if (dev->shared_host && dev->acquire_ownership) {
+		r = dev->acquire_ownership();
+		if (r < 0) {
+			dev_WARN(dev->dev, "%s couldn't acquire ownership\n",
+					__func__);
+			return r;
+		}
+	}
 	r = i2c_dw_init(dev);
-	if (r)
+	if (r) {
+		if (dev->shared_host && dev->release_ownership)
+			dev->release_ownership();
 		return r;
+	}
 
 	i2c_dw_disable_int(dev);
-	r = devm_request_irq(&pdev->dev, dev->irq, i2c_dw_isr, IRQF_SHARED,
-			pdev->name, dev);
-	if (r) {
-		dev_err(&pdev->dev, "failure requesting irq %i\n", dev->irq);
-		return r;
+
+	if (dev->shared_host && dev->release_ownership)
+		dev->release_ownership();
+
+	if (!dev->polling) {
+		r = devm_request_irq(&pdev->dev, dev->irq, i2c_dw_isr,
+				IRQF_SHARED, pdev->name, dev);
+		if (r) {
+			dev_err(&pdev->dev, "failure requesting irq %i\n",
+				dev->irq);
+			return r;
+		}
 	}
 
 	adap = &dev->adapter;
@@ -228,11 +421,17 @@ static int dw_i2c_probe(struct platform_device *pdev)
 		return r;
 	}
 
-	pm_runtime_set_autosuspend_delay(&pdev->dev, 1000);
-	pm_runtime_use_autosuspend(&pdev->dev);
-	pm_runtime_set_active(&pdev->dev);
-	pm_runtime_enable(&pdev->dev);
+	if (dev->shared_host) {
+		pm_runtime_forbid(&pdev->dev);
+	} else {
+		pm_runtime_set_autosuspend_delay(&pdev->dev, 1000);
+		pm_runtime_use_autosuspend(&pdev->dev);
+		pm_runtime_set_active(&pdev->dev);
+		pm_runtime_enable(&pdev->dev);
+	}
 
+	dw_i2c_acpi_install_space_handler(pdev);
+	acpi_walk_dep_device_list();
 	return 0;
 }
 
@@ -260,34 +459,84 @@ static const struct of_device_id dw_i2c_of_match[] = {
 MODULE_DEVICE_TABLE(of, dw_i2c_of_match);
 #endif
 
-#ifdef CONFIG_PM_SLEEP
-static int dw_i2c_suspend(struct device *dev)
+#ifdef CONFIG_PM
+static int dw_i2c_suspend_late(struct device *dev)
 {
 	struct platform_device *pdev = to_platform_device(dev);
 	struct dw_i2c_dev *i_dev = platform_get_drvdata(pdev);
 
+	dev_dbg(dev, "%s\n", __func__);
+
+	if (i_dev->polling)
+		return 0;
+
+	mutex_lock(&i_dev->lock);
+	i2c_dw_disable(i_dev);
+	clk_disable_unprepare(i_dev->clk);
+
+	i_dev->status |= STATUS_SUSPENDED;
+	mutex_unlock(&i_dev->lock);
+
+	return 0;
+}
+
+static int dw_i2c_resume_early(struct device *dev)
+{
+	struct platform_device *pdev = to_platform_device(dev);
+	struct dw_i2c_dev *i_dev = platform_get_drvdata(pdev);
+
+
+	dev_dbg(dev, "%s\n", __func__);
+
+	if (i_dev->polling)
+		return 0;
+
+	mutex_lock(&i_dev->lock);
+	clk_prepare_enable(i_dev->clk);
+	i2c_dw_init(i_dev);
+
+	i_dev->status &= ~STATUS_SUSPENDED;
+	mutex_unlock(&i_dev->lock);
+
+	return 0;
+}
+
+static int dw_i2c_runtime_suspend(struct device *dev)
+{
+	struct platform_device *pdev = to_platform_device(dev);
+	struct dw_i2c_dev *i_dev = platform_get_drvdata(pdev);
+
+	if (i_dev->polling)
+		return 0;
+
+	i2c_dw_disable(i_dev);
 	clk_disable_unprepare(i_dev->clk);
 
 	return 0;
 }
 
-static int dw_i2c_resume(struct device *dev)
+static int dw_i2c_runtime_resume(struct device *dev)
 {
 	struct platform_device *pdev = to_platform_device(dev);
 	struct dw_i2c_dev *i_dev = platform_get_drvdata(pdev);
+
+	if (i_dev->polling)
+		return 0;
 
 	clk_prepare_enable(i_dev->clk);
 	i2c_dw_init(i_dev);
 
 	return 0;
 }
-
-static SIMPLE_DEV_PM_OPS(dw_i2c_dev_pm_ops, dw_i2c_suspend, dw_i2c_resume);
-#define DW_I2C_DEV_PM_OPS	(&dw_i2c_dev_pm_ops)
-#else
-#define DW_I2C_DEV_PM_OPS	NULL
 #endif
 
+static const struct dev_pm_ops dw_i2c_dev_pm_ops = {
+#ifdef CONFIG_PM_SLEEP
+	.suspend_late = dw_i2c_suspend_late,
+	.resume_early = dw_i2c_resume_early,
+#endif
+	SET_RUNTIME_PM_OPS(dw_i2c_runtime_suspend, dw_i2c_runtime_resume, NULL)
+};
 /* work with hotplug and coldplug */
 MODULE_ALIAS("platform:i2c_designware");
 
@@ -299,7 +548,7 @@ static struct platform_driver dw_i2c_driver = {
 		.owner	= THIS_MODULE,
 		.of_match_table = of_match_ptr(dw_i2c_of_match),
 		.acpi_match_table = ACPI_PTR(dw_i2c_acpi_match),
-		.pm	= DW_I2C_DEV_PM_OPS,
+		.pm	= &dw_i2c_dev_pm_ops,
 	},
 };
 
@@ -307,7 +556,7 @@ static int __init dw_i2c_init_driver(void)
 {
 	return platform_driver_register(&dw_i2c_driver);
 }
-subsys_initcall(dw_i2c_init_driver);
+fs_initcall_sync(dw_i2c_init_driver);
 
 static void __exit dw_i2c_exit_driver(void)
 {

@@ -146,4 +146,9 @@ source "drivers/staging/dgnc/Kconfig"
 
 source "drivers/staging/dgap/Kconfig"
 
+source "drivers/staging/pn544/Kconfig"
+
+source "drivers/staging/modem_control/Kconfig"
+
+source "drivers/staging/fdp/Kconfig"
 endif # STAGING

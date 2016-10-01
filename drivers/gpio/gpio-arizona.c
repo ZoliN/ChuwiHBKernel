@@ -1,6 +1,7 @@
 /*
  * gpiolib support for Wolfson Arizona class devices
  *
+ * Copyright 2014 CirrusLogic, Inc.
  * Copyright 2012 Wolfson Microelectronics PLC.
  *
  * Author: Mark Brown <broonie@opensource.wolfsonmicro.com>
@@ -115,9 +116,16 @@ static int arizona_gpio_probe(struct platform_device *pdev)
 
 	switch (arizona->type) {
 	case WM5102:
+	case WM8280:
 	case WM5110:
 	case WM8997:
+	case WM8998:
+	case WM1814:
 		arizona_gpio->gpio_chip.ngpio = 5;
+		break;
+	case WM1831:
+	case CS47L24:
+		arizona_gpio->gpio_chip.ngpio = 2;
 		break;
 	default:
 		dev_err(&pdev->dev, "Unknown chip variant %d\n",

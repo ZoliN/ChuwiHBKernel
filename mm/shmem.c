@@ -822,6 +822,21 @@ redirty:
 	return 0;
 }
 
+#ifdef CONFIG_MIGRATION
+static int shmem_migratepage(struct address_space *mapping,
+			     struct page *newpage, struct page *page,
+			     enum migrate_mode mode)
+{
+	struct shmem_migrate_info *migrate_info = mapping->private_data;
+
+	if (migrate_info && migrate_info->dev_migratepage)
+		return migrate_info->dev_migratepage(mapping, newpage, page,
+				mode, migrate_info->dev_private_data);
+
+	return migrate_page(mapping, newpage, page, mode);
+}
+#endif
+
 #ifdef CONFIG_NUMA
 #ifdef CONFIG_TMPFS
 static void shmem_show_mpol(struct seq_file *seq, struct mempolicy *mpol)
@@ -2731,7 +2746,9 @@ static const struct address_space_operations shmem_aops = {
 	.write_begin	= shmem_write_begin,
 	.write_end	= shmem_write_end,
 #endif
-	.migratepage	= migrate_page,
+#ifdef CONFIG_MIGRATION
+	.migratepage	= shmem_migratepage,
+#endif
 	.error_remove_page = generic_error_remove_page,
 };
 
@@ -3021,6 +3038,14 @@ struct file *shmem_file_setup(const char *name, loff_t size, unsigned long flags
 }
 EXPORT_SYMBOL_GPL(shmem_file_setup);
 
+void shmem_set_file(struct vm_area_struct *vma, struct file *file)
+{
+	if (vma->vm_file)
+		fput(vma->vm_file);
+	vma->vm_file = file;
+	vma->vm_ops = &shmem_vm_ops;
+}
+
 /**
  * shmem_zero_setup - setup a shared anonymous mapping
  * @vma: the vma to be mmapped is prepared by do_mmap_pgoff
@@ -3034,10 +3059,7 @@ int shmem_zero_setup(struct vm_area_struct *vma)
 	if (IS_ERR(file))
 		return PTR_ERR(file);
 
-	if (vma->vm_file)
-		fput(vma->vm_file);
-	vma->vm_file = file;
-	vma->vm_ops = &shmem_vm_ops;
+	shmem_set_file(vma, file);
 	return 0;
 }
 

@@ -28,6 +28,7 @@
 #include <linux/timer.h>
 #include <linux/kernel.h>
 #include <linux/usb/hcd.h>
+#include <linux/wakelock.h>
 
 /* Code sharing between pci-quirks and xhci hcd */
 #include	"xhci-ext-caps.h"
@@ -375,9 +376,11 @@ struct xhci_op_regs {
  */
 #define PORT_U1_TIMEOUT(p)	((p) & 0xff)
 #define PORT_U1_TIMEOUT_MASK	0xff
+#define PORT_U1_DISABLE	0xff
 /* Inactivity timer value for transitions into U2 */
 #define PORT_U2_TIMEOUT(p)	(((p) & 0xff) << 8)
 #define PORT_U2_TIMEOUT_MASK	(0xff << 8)
+#define PORT_U2_DISABLE	0xff
 /* Bits 24:31 for port testing */
 
 /* USB2 Protocol PORTSPMSC */
@@ -1422,6 +1425,7 @@ struct xhci_bus_state {
 	unsigned long		resume_done[USB_MAXCHILDREN];
 	/* which ports have started to resume */
 	unsigned long		resuming_ports;
+	unsigned long		resume_pending;
 	/* Which ports are waiting on RExit to U0 transition. */
 	unsigned long		rexit_ports;
 	struct completion	rexit_done[USB_MAXCHILDREN];
@@ -1560,6 +1564,9 @@ struct xhci_hcd {
 #define XHCI_PLAT		(1 << 16)
 #define XHCI_SLOW_SUSPEND	(1 << 17)
 #define XHCI_SPURIOUS_WAKEUP	(1 << 18)
+#define XHCI_SPURIOUS_PME	(1 << 19)
+#define XHCI_SSIC_DISABLE_STALL	(1 << 20)
+#define XHCI_PIPE_4_1_SYNC_PHYSTAT_TOGGLE	(1 << 21)
 	unsigned int		num_active_eps;
 	unsigned int		limit_active_eps;
 	/* There are two roothubs to keep track of bus suspend info for */
@@ -1579,11 +1586,22 @@ struct xhci_hcd {
 	/* cached usb2 extened protocol capabilites */
 	u32                     *ext_caps;
 	unsigned int            num_ext_caps;
+	/* support dual role switch per vendor extended capability */
+	void __iomem		*phy_mux_regs;
 	/* Compliance Mode Recovery Data */
 	struct timer_list	comp_mode_recovery_timer;
 	u32			port_status_u0;
 /* Compliance Mode Timer Triggered every 2 seconds */
 #define COMP_MODE_RCVRY_MSECS 2000
+	/* SSIC device present */
+	int ssic_device_present;
+	/* SSIC runtime is blocked */
+	bool ssic_runtime_blocked;
+	struct wake_lock ssic_wake_lock;
+	struct delayed_work ssic_delayed_work;
+
+	/* SSIC port number */
+	int ssic_port_number;
 };
 
 /* convert between an HCD pointer and the corresponding EHCI_HCD */

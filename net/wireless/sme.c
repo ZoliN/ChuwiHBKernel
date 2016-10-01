@@ -19,7 +19,6 @@
 #include "nl80211.h"
 #include "reg.h"
 #include "rdev-ops.h"
-
 /*
  * Software SME in cfg80211, using auth/assoc/deauth calls to the
  * driver. This is is for implementing nl80211's connect/disconnect
@@ -878,7 +877,8 @@ void __cfg80211_disconnected(struct net_device *dev, const u8 *ie,
 }
 
 void cfg80211_disconnected(struct net_device *dev, u16 reason,
-			   u8 *ie, size_t ie_len, gfp_t gfp)
+			   u8 *ie, size_t ie_len,
+			   bool locally_generated, gfp_t gfp)
 {
 	struct wireless_dev *wdev = dev->ieee80211_ptr;
 	struct cfg80211_registered_device *rdev = wiphy_to_dev(wdev->wiphy);
@@ -894,6 +894,7 @@ void cfg80211_disconnected(struct net_device *dev, u16 reason,
 	ev->dc.ie_len = ie_len;
 	memcpy((void *)ev->dc.ie, ie, ie_len);
 	ev->dc.reason = reason;
+	ev->dc.locally_generated = locally_generated;
 
 	spin_lock_irqsave(&wdev->event_lock, flags);
 	list_add_tail(&ev->list, &wdev->event_list);
@@ -952,7 +953,10 @@ int cfg80211_connect(struct cfg80211_registered_device *rdev,
 	}
 
 	wdev->connect_keys = connkeys;
-	memcpy(wdev->ssid, connect->ssid, connect->ssid_len);
+	if (connect->ssid_len <= IEEE80211_MAX_SSID_LEN)
+		memcpy(wdev->ssid, connect->ssid, connect->ssid_len);
+	else
+		return -EINVAL;
 	wdev->ssid_len = connect->ssid_len;
 
 	if (!rdev->ops->connect)

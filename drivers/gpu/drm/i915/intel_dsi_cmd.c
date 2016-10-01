@@ -130,8 +130,7 @@ static int dsi_vc_send_short(struct intel_dsi *intel_dsi, int channel,
 	struct drm_encoder *encoder = &intel_dsi->base.base;
 	struct drm_device *dev = encoder->dev;
 	struct drm_i915_private *dev_priv = dev->dev_private;
-	struct intel_crtc *intel_crtc = to_intel_crtc(encoder->crtc);
-	enum pipe pipe = intel_crtc->pipe;
+	enum pipe pipe = intel_dsi->port;
 	u32 ctrl_reg;
 	u32 ctrl;
 	u32 mask;
@@ -147,7 +146,8 @@ static int dsi_vc_send_short(struct intel_dsi *intel_dsi, int channel,
 		mask = LP_CTRL_FIFO_FULL;
 	}
 
-	if (wait_for((I915_READ(MIPI_GEN_FIFO_STAT(pipe)) & mask) == 0, 50)) {
+	if (wait_for_atomic((I915_READ(MIPI_GEN_FIFO_STAT(pipe)) &
+					mask) == 0, 5)) {
 		DRM_ERROR("Timeout waiting for HS/LP CTRL FIFO !full\n");
 		print_stat(intel_dsi);
 	}
@@ -172,25 +172,25 @@ static int dsi_vc_send_long(struct intel_dsi *intel_dsi, int channel,
 	struct drm_encoder *encoder = &intel_dsi->base.base;
 	struct drm_device *dev = encoder->dev;
 	struct drm_i915_private *dev_priv = dev->dev_private;
-	struct intel_crtc *intel_crtc = to_intel_crtc(encoder->crtc);
-	enum pipe pipe = intel_crtc->pipe;
-	u32 data_reg;
+	enum pipe pipe = intel_dsi->port;
+	u32 data_reg, ctrl_reg, ctrl;
 	int i, j, n;
-	u32 mask;
+	u32 ctrl_mask, data_mask;
 
 	DRM_DEBUG_KMS("channel %d, data_type %d, len %04x\n",
 		      channel, data_type, len);
 
 	if (intel_dsi->hs) {
 		data_reg = MIPI_HS_GEN_DATA(pipe);
-		mask = HS_DATA_FIFO_FULL;
+		ctrl_reg = MIPI_HS_GEN_CTRL(pipe);
+		ctrl_mask = HS_CTRL_FIFO_FULL;
+		data_mask = HS_DATA_FIFO_FULL;
 	} else {
 		data_reg = MIPI_LP_GEN_DATA(pipe);
-		mask = LP_DATA_FIFO_FULL;
+		ctrl_reg = MIPI_LP_GEN_CTRL(pipe);
+		ctrl_mask = LP_CTRL_FIFO_FULL;
+		data_mask = LP_DATA_FIFO_FULL;
 	}
-
-	if (wait_for((I915_READ(MIPI_GEN_FIFO_STAT(pipe)) & mask) == 0, 50))
-		DRM_ERROR("Timeout waiting for HS/LP DATA FIFO !full\n");
 
 	for (i = 0; i < len; i += n) {
 		u32 val = 0;
@@ -199,12 +199,40 @@ static int dsi_vc_send_long(struct intel_dsi *intel_dsi, int channel,
 		for (j = 0; j < n; j++)
 			val |= *data++ << 8 * j;
 
-		I915_WRITE(data_reg, val);
-		/* XXX: check for data fifo full, once that is set, write 4
-		 * dwords, then wait for not set, then continue. */
-	}
+		/*
+		 * check for data fifo !full, once that is set, write 4
+		 * dwords, then continue.
+		 * calculated time for the data FIFO to have at least 4 bytes of
+		 * free space is 297.600 usec for 5Mhz escape clock with ctrl
+		 * FIFO size of 8 dwords.
+		 * Number of bytes for DSI header packet = 64
+		 * Number of bytes for DSI footer = 14 bytes
+		 * Number of bytes for entry code = 8 bytes
+		 * Number of bytes read from data FIFO = 4 bytes
+		 * Total = 90 bytes
+		 * Number of bits = 720 bits
+		 * Number of Tlpx(considering spaced one hot encoding)
+		 * = 1440 Tlpx
+		 * Number of Tlps including Escape seqence = 1488 Tlps
+		 * Time taken in usec @ 5Mhz Esc clock = 297.6 usec
+		 */
+		if (wait_for_atomic((I915_READ(MIPI_GEN_FIFO_STAT(pipe)) &
+						data_mask) == 0, 5))
+			DRM_ERROR("Timeout for HS/LP DATA FIFO to be !FULL\n");
 
-	return dsi_vc_send_short(intel_dsi, channel, data_type, len);
+		I915_WRITE(data_reg, val);
+	}
+	ctrl = len << LONG_PACKET_WORD_COUNT_SHIFT;
+	ctrl |= channel << VIRTUAL_CHANNEL_SHIFT;
+	ctrl |= data_type << DATA_TYPE_SHIFT;
+
+	if (wait_for_atomic((I915_READ(MIPI_GEN_FIFO_STAT(pipe)) &
+					ctrl_mask) == 0, 5))
+		DRM_ERROR("Timeout for HS/LP CTRL FIFO to be !FULL\n");
+
+	I915_WRITE(ctrl_reg, ctrl);
+	return 0;
+
 }
 
 static int dsi_vc_write_common(struct intel_dsi *intel_dsi,
@@ -291,8 +319,7 @@ static int dsi_read_data_return(struct intel_dsi *intel_dsi,
 	struct drm_encoder *encoder = &intel_dsi->base.base;
 	struct drm_device *dev = encoder->dev;
 	struct drm_i915_private *dev_priv = dev->dev_private;
-	struct intel_crtc *intel_crtc = to_intel_crtc(encoder->crtc);
-	enum pipe pipe = intel_crtc->pipe;
+	enum pipe pipe = intel_dsi->port;
 	int i, len = 0;
 	u32 data_reg, val;
 
@@ -384,12 +411,149 @@ int dsi_vc_generic_read(struct intel_dsi *intel_dsi, int channel,
 	return 0;
 }
 
+int dsi_send_dcs_cmd(struct intel_dsi *intel_dsi, int channel,
+		const u8 *data, int len, bool pipe_render)
+{
+	struct drm_encoder *encoder = &intel_dsi->base.base;
+	struct drm_device *dev = encoder->dev;
+	struct drm_i915_private *dev_priv = dev->dev_private;
+	struct intel_crtc *intel_crtc = to_intel_crtc(encoder->crtc);
+	enum pipe pipe = intel_crtc->pipe;
+	u32 cmd_addr, cmd_addr_2;
+
+
+	if ((I915_READ(PIPECONF(pipe)) & PIPECONF_MIPI_DSR_ENABLE) == 0)
+		return -EBUSY;
+
+	if (intel_dsi->dual_link)
+		pipe = PIPE_A;
+
+	if (I915_READ(MIPI_COMMAND_ADDRESS(pipe)) & COMMAND_VALID)
+		return -EBUSY;
+
+	if (intel_dsi->cmd_buff == NULL)
+		return -ENOMEM;
+
+	memcpy(intel_dsi->cmd_buff, data, len);
+	cmd_addr = intel_dsi->cmd_buff_phy_addr & COMMAND_MEM_ADDRESS_MASK;
+	cmd_addr |= COMMAND_VALID;
+	cmd_addr_2 = 0;
+
+	if (pipe_render)
+		cmd_addr |= MEMORY_WRITE_DATA_FROM_PIPE_RENDERING;
+
+	if (intel_dsi->dual_link) {
+		pipe = PIPE_B;
+
+		if (I915_READ(MIPI_COMMAND_ADDRESS(pipe)) & COMMAND_VALID)
+			return -EBUSY;
+
+		if (intel_dsi->cmd_buff_2 == NULL)
+			return -ENOMEM;
+
+		memcpy(intel_dsi->cmd_buff_2, data, len);
+		cmd_addr_2 = intel_dsi->cmd_buff_phy_addr_2 &
+						COMMAND_MEM_ADDRESS_MASK;
+		cmd_addr_2 |= COMMAND_VALID;
+
+		if (pipe_render)
+			cmd_addr_2 |= MEMORY_WRITE_DATA_FROM_PIPE_RENDERING;
+
+		pipe = PIPE_A;
+	}
+
+	I915_WRITE(MIPI_COMMAND_LENGTH(pipe), len);
+	I915_WRITE(MIPI_COMMAND_ADDRESS(pipe), cmd_addr);
+
+	if (intel_dsi->dual_link) {
+		pipe = PIPE_B;
+		I915_WRITE(MIPI_COMMAND_LENGTH(pipe), len);
+		I915_WRITE(MIPI_COMMAND_ADDRESS(pipe), cmd_addr_2);
+	}
+
+	return 0;
+}
+
 /*
  * send a video mode command
  *
  * XXX: commands with data in MIPI_DPI_DATA?
  */
-int dpi_send_cmd(struct intel_dsi *intel_dsi, u32 cmd)
+int dpi_send_cmd(struct intel_dsi *intel_dsi, u32 cmd, bool hs)
+{
+	struct drm_encoder *encoder = &intel_dsi->base.base;
+	struct drm_device *dev = encoder->dev;
+	struct drm_i915_private *dev_priv = dev->dev_private;
+	struct intel_crtc *intel_crtc = to_intel_crtc(encoder->crtc);
+	enum pipe pipe = intel_crtc->pipe;
+	u32 mask;
+	int count = 1;
+
+	/* XXX: pipe, hs */
+	if (hs)
+		cmd &= ~DPI_LP_MODE;
+	else
+		cmd |= DPI_LP_MODE;
+
+	mask = DPI_FIFO_EMPTY;
+
+	if (intel_dsi->dual_link) {
+		count = 2;
+		pipe = PIPE_A;
+	}
+
+	do {
+		/* clear bit */
+		I915_WRITE(MIPI_INTR_STAT(pipe), SPL_PKT_SENT_INTERRUPT);
+
+		/* XXX: old code skips write if control unchanged */
+		if (cmd == I915_READ(MIPI_DPI_CONTROL(pipe)))
+			DRM_ERROR("Same special packet %02x twice in a row.\n",
+									cmd);
+		I915_WRITE(MIPI_DPI_CONTROL(pipe), cmd);
+
+		mask = SPL_PKT_SENT_INTERRUPT;
+		if (wait_for((I915_READ(MIPI_INTR_STAT(pipe)) & mask)
+								== mask, 100))
+			DRM_ERROR("Video mode command 0x%08x send failed.\n",
+									cmd);
+		/* For Port C for dual link */
+		if (intel_dsi->dual_link)
+			pipe = PIPE_B;
+	} while (--count > 0);
+
+	return 0;
+}
+
+void wait_for_dpi_dbi_fifo_empty(struct intel_dsi *intel_dsi)
+{
+	struct drm_encoder *encoder = &intel_dsi->base.base;
+	struct drm_device *dev = encoder->dev;
+	struct drm_i915_private *dev_priv = dev->dev_private;
+	struct intel_crtc *intel_crtc = to_intel_crtc(encoder->crtc);
+	enum pipe pipe = intel_crtc->pipe;
+	u32 mask;
+	int count = 1;
+
+	mask = DPI_FIFO_EMPTY | DBI_FIFO_EMPTY;
+
+	if (intel_dsi->dual_link) {
+		count = 2;
+		pipe = PIPE_A;
+	}
+
+	do {
+		if (wait_for((I915_READ(MIPI_GEN_FIFO_STAT(pipe)) & mask)
+								== mask, 100))
+			DRM_ERROR("DPI/DBI FIFO empty wait timed out\n");
+
+		/* For Port C for dual link */
+		if (intel_dsi->dual_link)
+			pipe = PIPE_B;
+	} while (--count > 0);
+}
+
+void wait_for_dsi_fifo_empty(struct intel_dsi *intel_dsi)
 {
 	struct drm_encoder *encoder = &intel_dsi->base.base;
 	struct drm_device *dev = encoder->dev;
@@ -398,30 +562,9 @@ int dpi_send_cmd(struct intel_dsi *intel_dsi, u32 cmd)
 	enum pipe pipe = intel_crtc->pipe;
 	u32 mask;
 
-	/* XXX: pipe, hs */
-	if (intel_dsi->hs)
-		cmd &= ~DPI_LP_MODE;
-	else
-		cmd |= DPI_LP_MODE;
+	mask = LP_CTRL_FIFO_EMPTY | HS_CTRL_FIFO_EMPTY |
+					LP_DATA_FIFO_EMPTY | HS_DATA_FIFO_EMPTY;
 
-	/* DPI virtual channel?! */
-
-	mask = DPI_FIFO_EMPTY;
-	if (wait_for((I915_READ(MIPI_GEN_FIFO_STAT(pipe)) & mask) == mask, 50))
-		DRM_ERROR("Timeout waiting for DPI FIFO empty.\n");
-
-	/* clear bit */
-	I915_WRITE(MIPI_INTR_STAT(pipe), SPL_PKT_SENT_INTERRUPT);
-
-	/* XXX: old code skips write if control unchanged */
-	if (cmd == I915_READ(MIPI_DPI_CONTROL(pipe)))
-		DRM_ERROR("Same special packet %02x twice in a row.\n", cmd);
-
-	I915_WRITE(MIPI_DPI_CONTROL(pipe), cmd);
-
-	mask = SPL_PKT_SENT_INTERRUPT;
-	if (wait_for((I915_READ(MIPI_INTR_STAT(pipe)) & mask) == mask, 100))
-		DRM_ERROR("Video mode command 0x%08x send failed.\n", cmd);
-
-	return 0;
+	if (wait_for((I915_READ(MIPI_GEN_FIFO_STAT(pipe)) & mask) == mask, 100))
+		DRM_ERROR("DPI FIFOs are not empty\n");
 }

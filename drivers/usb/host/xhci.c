@@ -31,6 +31,7 @@
 
 #include "xhci.h"
 #include "xhci-trace.h"
+#include "xhci-intel-cap.h"
 
 #define DRIVER_AUTHOR "Sarah Sharp"
 #define DRIVER_DESC "'eXtensible' Host Controller (xHC) Driver"
@@ -165,6 +166,10 @@ int xhci_reset(struct xhci_hcd *xhci)
 	u32 state;
 	int ret, i;
 
+	/* Disable PIPE 4.1 synchronous phystatus */
+	if (xhci->quirks & XHCI_PIPE_4_1_SYNC_PHYSTAT_TOGGLE)
+		xhci_intel_pipe_sync_phystatus_quirk(xhci, true);
+
 	state = readl(&xhci->op_regs->status);
 	if ((state & STS_HALT) == 0) {
 		xhci_warn(xhci, "Host controller not halted, aborting reset.\n");
@@ -194,6 +199,7 @@ int xhci_reset(struct xhci_hcd *xhci)
 		xhci->bus_state[i].port_c_suspend = 0;
 		xhci->bus_state[i].suspended_ports = 0;
 		xhci->bus_state[i].resuming_ports = 0;
+		xhci->bus_state[i].resume_pending = 0;
 	}
 
 	return ret;
@@ -548,6 +554,10 @@ int xhci_init(struct usb_hcd *hcd)
 		compliance_mode_recovery_timer_init(xhci);
 	}
 
+	/* Disable the Retrain Timeout (on init) */
+	if (xhci->quirks & XHCI_SSIC_DISABLE_STALL)
+		xhci_change_ssic_regs(xhci, false);
+
 	return retval;
 }
 
@@ -879,6 +889,43 @@ static void xhci_disable_port_wake_on_bits(struct xhci_hcd *xhci)
 	spin_unlock_irqrestore(&xhci->lock, flags);
 }
 
+static inline void xhci_resume_pending_ports(struct xhci_hcd *xhci)
+{
+	struct xhci_bus_state	*bus_state;
+	__le32 __iomem		**port_array;
+	int			port_index;
+	u32			temp;
+
+	/* check if any usb3 port to resume */
+	bus_state = &xhci->bus_state[hcd_index(xhci->shared_hcd)];
+	if (!bus_state->resume_pending)
+		return;
+
+	port_index = xhci->num_usb3_ports;
+	port_array = xhci->usb3_ports;
+
+	while (--port_index) {
+		if (!test_bit(port_index, &bus_state->resume_pending))
+			continue;
+
+		xhci_dbg(xhci, "resume SS port %d\n", port_index);
+		clear_bit(port_index, &bus_state->resume_pending);
+		temp = readl(port_array[port_index]);
+		if ((temp & PORT_PLC) &&
+				(temp & PORT_PLS_MASK) == XDEV_RESUME) {
+
+			bus_state->port_remote_wakeup |=
+				1 << port_index;
+			xhci_test_and_clear_bit(xhci, port_array,
+					port_index, PORT_PLC);
+			xhci_set_link_state(xhci, port_array,
+					port_index, XDEV_U0);
+			xhci_dbg(xhci, "link set to U0 from resume\n");
+		} else
+			xhci_err(xhci, "PLC && PLS=RESUME is not true!\n");
+	}
+}
+
 /*
  * Stop HC (not bus-specific)
  *
@@ -1073,6 +1120,8 @@ int xhci_resume(struct xhci_hcd *xhci, bool hibernated)
 	writel(command, &xhci->op_regs->command);
 	xhci_handshake(xhci, &xhci->op_regs->status, STS_HALT,
 		  0, 250 * 1000);
+
+	xhci_resume_pending_ports(xhci);
 
 	/* step 5: walk topology and initialize portsc,
 	 * portpmsc and portli
@@ -4818,6 +4867,14 @@ int xhci_gen_setup(struct usb_hcd *hcd, xhci_get_quirks_t get_quirks)
 	xhci_print_registers(xhci);
 
 	xhci->quirks = quirks;
+
+	wake_lock_init(&xhci->ssic_wake_lock,
+			WAKE_LOCK_SUSPEND,
+			"xhci_enumeration");
+	/* In case ACPI doesn't provide info */
+	xhci->ssic_device_present = -1;
+	INIT_DELAYED_WORK(&xhci->ssic_delayed_work,
+		hub_intel_ssic_check_unblock_work);
 
 	get_quirks(dev, xhci);
 

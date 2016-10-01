@@ -219,6 +219,13 @@ config ACPI_THERMAL
 	  To compile this driver as a module, choose M here:
 	  the module will be called thermal.
 
+config ACPI_THERMAL_REL
+       tristate "ACPI thermal relationship"
+       depends on ACPI && THERMAL
+       help
+	ACPI 4.0 introduced thermal realtionship tables for active and passive
+	cooling. Enable this to expose these tables to drivers and userspace.
+
 config ACPI_NUMA
 	bool "NUMA support"
 	depends on NUMA
@@ -381,5 +388,40 @@ config ACPI_EXTLOG
 	  Enhanced MCA Logging allows firmware to provide additional error
 	  information to system software, synchronous with MCE or CMCI. This
 	  driver adds support for that functionality.
+
+menuconfig PMIC_OPREGION
+	bool "PMIC (Power Management Integrated Circuit) operation region support"
+	help
+	  Select this option to enable support for ACPI operation
+	  region of the PMIC chip. The operation region can be used
+	  to control power rails and sensor reading/writing on the
+	  PMIC chip.
+
+if PMIC_OPREGION
+config CRC_PMIC_OPREGION
+	bool "ACPI operation region support for CrystalCove PMIC"
+	depends on INTEL_SOC_PMIC
+	help
+	  This config adds ACPI operation region support for CrystalCove PMIC.
+
+config WC_PMIC_OPREGION
+	bool "ACPI operation region support for Whiskey Cove PMIC"
+	depends on INTEL_SOC_PMIC
+	help
+	  This config adds ACPI operation region support for WhiskeyCove PMIC.
+
+config DC_PMIC_OPREGION
+	bool "ACPI operation region support for Dollar Cove PMIC"
+	depends on INTEL_SOC_PMIC
+	help
+	  This config adds ACPI operation region support for DollarCove PMIC.
+
+config DC_TI_PMIC_OPREGION
+	bool "ACPI operation region support for TI Dollar Cove PMIC"
+	depends on INTEL_SOC_PMIC
+	help
+	  This config adds ACPI operation region support for TI DollarCove PMIC.
+
+endif
 
 endif	# ACPI

@@ -1948,6 +1948,10 @@ static void si_initialize_powertune_defaults(struct radeon_device *rdev)
 			si_pi->cac_weights = cac_weights_cape_verde_pro;
 			si_pi->dte_data = dte_data_cape_verde;
 			break;
+		case 0x682C:
+			si_pi->cac_weights = cac_weights_cape_verde_pro;
+			si_pi->dte_data = dte_data_sun_xt;
+			break;
 		case 0x6825:
 		case 0x6827:
 			si_pi->cac_weights = cac_weights_heathrow;
@@ -1971,10 +1975,9 @@ static void si_initialize_powertune_defaults(struct radeon_device *rdev)
 			si_pi->dte_data = dte_data_venus_xt;
 			break;
 		case 0x6823:
-			si_pi->cac_weights = cac_weights_chelsea_pro;
-			si_pi->dte_data = dte_data_venus_pro;
-			break;
 		case 0x682B:
+		case 0x6822:
+		case 0x682A:
 			si_pi->cac_weights = cac_weights_chelsea_pro;
 			si_pi->dte_data = dte_data_venus_pro;
 			break;
@@ -1988,6 +1991,7 @@ static void si_initialize_powertune_defaults(struct radeon_device *rdev)
 		case 0x6601:
 		case 0x6621:
 		case 0x6603:
+		case 0x6605:
 			si_pi->cac_weights = cac_weights_mars_pro;
 			si_pi->lcac_config = lcac_mars_pro;
 			si_pi->cac_override = cac_override_oland;
@@ -1998,6 +2002,7 @@ static void si_initialize_powertune_defaults(struct radeon_device *rdev)
 		case 0x6600:
 		case 0x6606:
 		case 0x6620:
+		case 0x6604:
 			si_pi->cac_weights = cac_weights_mars_xt;
 			si_pi->lcac_config = lcac_mars_pro;
 			si_pi->cac_override = cac_override_oland;
@@ -2006,6 +2011,8 @@ static void si_initialize_powertune_defaults(struct radeon_device *rdev)
 			update_dte_from_pl2 = true;
 			break;
 		case 0x6611:
+		case 0x6613:
+		case 0x6608:
 			si_pi->cac_weights = cac_weights_oland_pro;
 			si_pi->lcac_config = lcac_mars_pro;
 			si_pi->cac_override = cac_override_oland;
@@ -2900,24 +2907,6 @@ static int si_init_smc_spll_table(struct radeon_device *rdev)
 	return ret;
 }
 
-struct si_dpm_quirk {
-	u32 chip_vendor;
-	u32 chip_device;
-	u32 subsys_vendor;
-	u32 subsys_device;
-	u32 max_sclk;
-	u32 max_mclk;
-};
-
-/* cards with dpm stability problems */
-static struct si_dpm_quirk si_dpm_quirk_list[] = {
-	/* PITCAIRN - https://bugs.freedesktop.org/show_bug.cgi?id=76490 */
-	{ PCI_VENDOR_ID_ATI, 0x6810, 0x1462, 0x3036, 0, 120000 },
-	{ PCI_VENDOR_ID_ATI, 0x6811, 0x174b, 0xe271, 0, 120000 },
-	{ PCI_VENDOR_ID_ATI, 0x6810, 0x174b, 0xe271, 85000, 90000 },
-	{ 0, 0, 0, 0 },
-};
-
 static void si_apply_state_adjust_rules(struct radeon_device *rdev,
 					struct radeon_ps *rps)
 {
@@ -2928,22 +2917,7 @@ static void si_apply_state_adjust_rules(struct radeon_device *rdev,
 	u32 mclk, sclk;
 	u16 vddc, vddci;
 	u32 max_sclk_vddc, max_mclk_vddci, max_mclk_vddc;
-	u32 max_sclk = 0, max_mclk = 0;
 	int i;
-	struct si_dpm_quirk *p = si_dpm_quirk_list;
-
-	/* Apply dpm quirks */
-	while (p && p->chip_device != 0) {
-		if (rdev->pdev->vendor == p->chip_vendor &&
-		    rdev->pdev->device == p->chip_device &&
-		    rdev->pdev->subsystem_vendor == p->subsys_vendor &&
-		    rdev->pdev->subsystem_device == p->subsys_device) {
-			max_sclk = p->max_sclk;
-			max_mclk = p->max_mclk;
-			break;
-		}
-		++p;
-	}
 
 	if ((rdev->pm.dpm.new_active_crtc_count > 1) ||
 	    ni_dpm_vblank_too_short(rdev))
@@ -2996,14 +2970,6 @@ static void si_apply_state_adjust_rules(struct radeon_device *rdev,
 		if (max_mclk_vddc) {
 			if (ps->performance_levels[i].mclk > max_mclk_vddc)
 				ps->performance_levels[i].mclk = max_mclk_vddc;
-		}
-		if (max_mclk) {
-			if (ps->performance_levels[i].mclk > max_mclk)
-				ps->performance_levels[i].mclk = max_mclk;
-		}
-		if (max_sclk) {
-			if (ps->performance_levels[i].sclk > max_sclk)
-				ps->performance_levels[i].sclk = max_sclk;
 		}
 	}
 
@@ -6241,7 +6207,7 @@ static void si_parse_pplib_clock_info(struct radeon_device *rdev,
 	if ((rps->class2 & ATOM_PPLIB_CLASSIFICATION2_ULV) &&
 	    index == 0) {
 		/* XXX disable for A0 tahiti */
-		si_pi->ulv.supported = false;
+		si_pi->ulv.supported = true;
 		si_pi->ulv.pl = *pl;
 		si_pi->ulv.one_pcie_lane_in_ulv = false;
 		si_pi->ulv.volt_change_delay = SISLANDS_ULVVOLTAGECHANGEDELAY_DFLT;
@@ -6312,9 +6278,6 @@ static int si_parse_power_table(struct radeon_device *rdev)
 	if (!rdev->pm.dpm.ps)
 		return -ENOMEM;
 	power_state_offset = (u8 *)state_array->states;
-	rdev->pm.dpm.platform_caps = le32_to_cpu(power_info->pplib.ulPlatformCaps);
-	rdev->pm.dpm.backbias_response_time = le16_to_cpu(power_info->pplib.usBackbiasTime);
-	rdev->pm.dpm.voltage_response_time = le16_to_cpu(power_info->pplib.usVoltageTime);
 	for (i = 0; i < state_array->ucNumEntries; i++) {
 		u8 *idx;
 		power_state = (union pplib_power_state *)power_state_offset;
@@ -6390,6 +6353,10 @@ int si_dpm_init(struct radeon_device *rdev)
 	eg_pi->acpi_vddci = 0;
 	pi->min_vddc_in_table = 0;
 	pi->max_vddc_in_table = 0;
+
+	ret = r600_get_platform_caps(rdev);
+	if (ret)
+		return ret;
 
 	ret = si_parse_power_table(rdev);
 	if (ret)

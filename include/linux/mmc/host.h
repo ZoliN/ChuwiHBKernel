@@ -15,8 +15,10 @@
 #include <linux/sched.h>
 #include <linux/device.h>
 #include <linux/fault-inject.h>
+#include <linux/pm_qos.h>
 
 #include <linux/mmc/core.h>
+#include <linux/mmc/card.h>
 #include <linux/mmc/pm.h>
 
 struct mmc_ios {
@@ -58,13 +60,9 @@ struct mmc_ios {
 #define MMC_TIMING_UHS_SDR50	5
 #define MMC_TIMING_UHS_SDR104	6
 #define MMC_TIMING_UHS_DDR50	7
-#define MMC_TIMING_MMC_HS200	8
-
-#define MMC_SDR_MODE		0
-#define MMC_1_2V_DDR_MODE	1
-#define MMC_1_8V_DDR_MODE	2
-#define MMC_1_2V_SDR_MODE	3
-#define MMC_1_8V_SDR_MODE	4
+#define MMC_TIMING_MMC_DDR52	8
+#define MMC_TIMING_MMC_HS200	9
+#define MMC_TIMING_MMC_HS400	10
 
 	unsigned char	signal_voltage;		/* signalling voltage (1.8V or 3.3V) */
 
@@ -136,6 +134,9 @@ struct mmc_host_ops {
 
 	/* The tuning command opcode value is different for SD and eMMC cards */
 	int	(*execute_tuning)(struct mmc_host *host, u32 opcode);
+
+	/* Prepare HS400 target operating frequency depending host driver */
+	int	(*prepare_hs400_tuning)(struct mmc_host *host, struct mmc_ios *ios);
 	int	(*select_drive_strength)(unsigned int max_dtr, int host_drv, int card_drv);
 	void	(*hw_reset)(struct mmc_host *host);
 	void	(*card_event)(struct mmc_host *host);
@@ -147,6 +148,7 @@ struct device;
 struct mmc_async_req {
 	/* active mmc request */
 	struct mmc_request	*mrq;
+	bool	success;
 	/*
 	 * Check error status of completed mmc request.
 	 * Returns 0 if success otherwise non zero.
@@ -184,6 +186,8 @@ struct mmc_context_info {
 	bool			is_done_rcv;
 	bool			is_new_req;
 	bool			is_waiting_last_req;
+	bool			is_cmdq_busy;
+	bool			is_pending_cmdq;
 	wait_queue_head_t	wait;
 	spinlock_t		lock;
 };
@@ -282,6 +286,12 @@ struct mmc_host {
 				 MMC_CAP2_PACKED_WR)
 #define MMC_CAP2_NO_PRESCAN_POWERUP (1 << 14)	/* Don't power up before scan */
 #define MMC_CAP2_SANITIZE	(1 << 15)		/* Support Sanitize */
+#define MMC_CAP2_POLL_R1B_BUSY	(1 << 16)	/* host poll R1B busy*/
+#define MMC_CAP2_HS400_1_8V	(1 << 17)	/* Can support HS400 1.8V */
+#define MMC_CAP2_HS400_1_2V	(1 << 18)	/* Can support HS400 1.2V */
+#define MMC_CAP2_HS400		(MMC_CAP2_HS400_1_8V | \
+				 MMC_CAP2_HS400_1_2V)
+#define MMC_CAP2_CAN_DO_CMDQ	(1 << 19)
 
 	mmc_pm_flag_t		pm_caps;	/* supported pm features */
 
@@ -362,6 +372,17 @@ struct mmc_host {
 
 	unsigned int		slotno;	/* used for sdio acpi binding */
 
+#ifdef CONFIG_MMC_EMBEDDED_SDIO
+	struct {
+		struct sdio_cis			*cis;
+		struct sdio_cccr		*cccr;
+		struct sdio_embedded_func	*funcs;
+		int				num_funcs;
+	} embedded_sdio_data;
+#endif
+
+	struct pm_qos_request *qos;
+
 	unsigned long		private[0] ____cacheline_aligned;
 };
 
@@ -370,6 +391,14 @@ int mmc_add_host(struct mmc_host *);
 void mmc_remove_host(struct mmc_host *);
 void mmc_free_host(struct mmc_host *);
 int mmc_of_parse(struct mmc_host *host);
+
+#ifdef CONFIG_MMC_EMBEDDED_SDIO
+extern void mmc_set_embedded_sdio_data(struct mmc_host *host,
+				       struct sdio_cis *cis,
+				       struct sdio_cccr *cccr,
+				       struct sdio_embedded_func *funcs,
+				       int num_funcs);
+#endif
 
 static inline void *mmc_priv(struct mmc_host *host)
 {
@@ -484,4 +513,32 @@ static inline unsigned int mmc_host_clk_rate(struct mmc_host *host)
 	return host->ios.clock;
 }
 #endif
+
+static inline int mmc_card_hs(struct mmc_card *card)
+{
+	return card->host->ios.timing == MMC_TIMING_SD_HS ||
+		card->host->ios.timing == MMC_TIMING_MMC_HS;
+}
+
+static inline int mmc_card_uhs(struct mmc_card *card)
+{
+	return card->host->ios.timing >= MMC_TIMING_UHS_SDR12 &&
+		card->host->ios.timing <= MMC_TIMING_UHS_DDR50;
+}
+
+static inline bool mmc_card_hs200(struct mmc_card *card)
+{
+	return card->host->ios.timing == MMC_TIMING_MMC_HS200;
+}
+
+static inline bool mmc_card_ddr52(struct mmc_card *card)
+{
+	return card->host->ios.timing == MMC_TIMING_MMC_DDR52;
+}
+
+static inline bool mmc_card_hs400(struct mmc_card *card)
+{
+	return card->host->ios.timing == MMC_TIMING_MMC_HS400;
+}
+
 #endif /* LINUX_MMC_HOST_H */

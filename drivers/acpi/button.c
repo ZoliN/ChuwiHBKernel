@@ -57,12 +57,36 @@
 #define ACPI_BUTTON_DEVICE_NAME_LID	"Lid Switch"
 #define ACPI_BUTTON_TYPE_LID		0x05
 
+/* Intel-defined power button interface implemented via the _DSM
+ * method on the PWRB object.  It has three functions as of version 0:
+ * the first returns a bitmask of supported functions, the second
+ * registers to receive an ACPI notification on power button release
+ * events, and the third is a synchronous poll of power button state.
+ * Not all systems will support notification. */
+#define ACPI_PWRB_DSM_UUID "9c355bcb-35fa-44f7-8a67-447359c36a03"
+#define ACPI_PWRB_DSM_VERSION 0
+#define ACPI_PWRB_DSM_RELEASE 0xc0
+
+enum {
+	ACPI_PWRB_DSM_PROBE	= 0,
+	ACPI_PWRB_DSM_REGISTER	= 1,
+	ACPI_PWRB_DSM_LEVEL	= 2,
+};
+
 #define _COMPONENT		ACPI_BUTTON_COMPONENT
 ACPI_MODULE_NAME("button");
 
 MODULE_AUTHOR("Paul Diefenbaugh");
 MODULE_DESCRIPTION("ACPI Button Driver");
 MODULE_LICENSE("GPL");
+
+static bool dsm_notify = true;
+module_param(dsm_notify, bool, 0644);
+MODULE_PARM_DESC(dsm_notify, "Enable _DSM notification of power button release");
+
+static bool dsm_poll = true;
+module_param(dsm_poll, bool, 0644);
+MODULE_PARM_DESC(dsm_poll, "Enable _DSM polling for power button release");
 
 static const struct acpi_device_id button_device_ids[] = {
 	{ACPI_BUTTON_HID_LID,    0},
@@ -99,13 +123,28 @@ static struct acpi_driver acpi_button_driver = {
 
 struct acpi_button {
 	unsigned int type;
+	struct acpi_device *acpi_dev;
 	struct input_dev *input;
 	char phys[32];			/* for input device */
 	unsigned long pushed;
+	bool dsm_notify;
+	bool dsm_poll;
 };
 
 static BLOCKING_NOTIFIER_HEAD(acpi_lid_notifier);
 static struct acpi_device *lid_device;
+
+static struct acpi_pwrbtn_poll_dev *pwrbtn_poll;
+static DEFINE_SPINLOCK(pwrbtn_lock);
+
+/* Polling frequency.  Intel ICH hardware documents a 12ms debounce
+ * timer, and 60Hz is about right generally. */
+#define PWRBTN_POLL_JIFFIES	max(HZ/60, 1)
+
+/* Safety valve vs. buggy (potentially in firmware) power button
+ * polling implementations.  4 seconds is the default system reset
+ * timer on Intel hardware. */
+#define PWRBTN_POLL_MAX		(HZ*4)
 
 /* --------------------------------------------------------------------------
                               FS Interface (/proc)
@@ -218,6 +257,80 @@ static int acpi_button_remove_fs(struct acpi_device *device)
 /* --------------------------------------------------------------------------
                                 Driver Interface
    -------------------------------------------------------------------------- */
+
+static int pwrb_dsm_call(acpi_handle *handle, int func)
+{
+	u8 uuid[16];
+	struct acpi_buffer buf = { ACPI_ALLOCATE_BUFFER, NULL };
+	struct acpi_object_list olist;
+	union acpi_object args[4], *out;
+	acpi_status err;
+	int i, ret = -1;
+
+	acpi_str_to_uuid(ACPI_PWRB_DSM_UUID, uuid);
+	args[0].type = ACPI_TYPE_BUFFER;
+	args[0].buffer.length = sizeof(uuid);
+	args[0].buffer.pointer = uuid;
+
+	args[1].type = ACPI_TYPE_INTEGER;
+	args[1].integer.value = ACPI_PWRB_DSM_VERSION;
+
+	args[2].type = ACPI_TYPE_INTEGER;
+	args[2].integer.value = func;
+
+	args[3].type = ACPI_TYPE_PACKAGE;
+	args[3].package.count = 0;
+	args[3].package.elements = NULL;
+
+	olist.count = ARRAY_SIZE(args);
+	olist.pointer = args;
+
+	if (func == ACPI_PWRB_DSM_PROBE) {
+		/* PROBE returns a bitmask of supported functions as a
+		 * buffer.  Return a failure here as 0: method not
+		 * present or not functioning correctly means "no
+		 * functions supported" */
+		ret = 0;
+		err = acpi_evaluate_object(handle, "_DSM", &olist, &buf);
+		out = buf.pointer;
+		if (!ACPI_FAILURE(err) && out->type == ACPI_TYPE_BUFFER) {
+			for (i = 0; i < out->buffer.length; i++)
+				ret |= (out->buffer.pointer[i] << (i*8));
+			kfree(buf.pointer);
+		}
+	} else {
+		unsigned long long acpiret;
+		err = acpi_evaluate_integer(handle, "_DSM", &olist, &acpiret);
+		if (ACPI_FAILURE(err))
+			ret = -1;
+		ret = (int)acpiret;
+	}
+
+	return ret;
+}
+
+static void pwrb_dsm_init(struct acpi_button *btn)
+{
+	struct acpi_device *dev = btn->acpi_dev;
+	int funcs = pwrb_dsm_call(dev->handle, ACPI_PWRB_DSM_PROBE);
+
+	if (dsm_notify && (funcs & ACPI_PWRB_DSM_REGISTER)) {
+		if (pwrb_dsm_call(dev->handle, ACPI_PWRB_DSM_REGISTER))
+			dev_err(&dev->dev, "PWRB release notification registration failed");
+		else
+			btn->dsm_notify = true;
+	}
+
+	if (dsm_poll && !btn->dsm_notify && (funcs & ACPI_PWRB_DSM_LEVEL))
+		btn->dsm_poll = true;
+}
+
+static int pwrb_dsm_poll(struct acpi_button *button)
+{
+	struct acpi_device *dev = button->acpi_dev;
+	return pwrb_dsm_call(dev->handle, ACPI_PWRB_DSM_LEVEL);
+}
+
 int acpi_lid_notifier_register(struct notifier_block *nb)
 {
 	return blocking_notifier_chain_register(&acpi_lid_notifier, nb);
@@ -279,6 +392,69 @@ static int acpi_lid_send_state(struct acpi_device *device)
 	return ret;
 }
 
+static void pwrbtn_timer(unsigned long arg)
+{
+	struct acpi_button *button = (struct acpi_button *)arg;
+	int pressed;
+	int toolong = (jiffies - pwrbtn_poll->started) > PWRBTN_POLL_MAX;
+	unsigned long flags;
+
+	if (toolong)
+		dev_err(&button->input->dev, "Power button poll failed to detect release");
+
+	spin_lock_irqsave(&pwrbtn_lock, flags);
+	if (button->dsm_poll)
+		pressed = pwrb_dsm_poll(button);
+	else
+		pressed = pwrbtn_poll->poll(pwrbtn_poll);
+	spin_unlock_irqrestore(&pwrbtn_lock, flags);
+
+	if (!pressed || toolong) {
+		input_report_key(button->input, KEY_POWER, 0);
+		input_sync(button->input);
+	} else {
+		mod_timer(&pwrbtn_poll->timer, jiffies + PWRBTN_POLL_JIFFIES);
+	}
+}
+
+int acpi_pwrbtn_poll_register(struct acpi_pwrbtn_poll_dev *dev)
+{
+	int ret = 0;
+	unsigned long flags;
+
+	spin_lock_irqsave(&pwrbtn_lock, flags);
+	if (pwrbtn_poll)
+		ret = -EBUSY;
+	else
+		pwrbtn_poll = dev;
+
+	init_timer(&pwrbtn_poll->timer);
+	pwrbtn_poll->timer.function = pwrbtn_timer;
+
+	spin_unlock_irqrestore(&pwrbtn_lock, flags);
+	return ret;
+}
+
+int acpi_pwrbtn_poll_unregister(struct acpi_pwrbtn_poll_dev *dev)
+{
+	unsigned long flags;
+	if (!pwrbtn_poll || pwrbtn_poll != dev)
+		return -EINVAL;
+	del_timer_sync(&pwrbtn_poll->timer);
+	spin_lock_irqsave(&pwrbtn_lock, flags);
+	pwrbtn_poll = NULL;
+	spin_unlock_irqrestore(&pwrbtn_lock, flags);
+	return 0;
+}
+
+static int start_pwrbtn_poll(struct acpi_button *button)
+{
+	int ret;
+	pwrbtn_poll->timer.data = (unsigned long)button;
+	pwrbtn_poll->started = jiffies;
+	return mod_timer(&pwrbtn_poll->timer, jiffies + PWRBTN_POLL_JIFFIES);
+}
+
 static void acpi_button_notify(struct acpi_device *device, u32 event)
 {
 	struct acpi_button *button = acpi_driver_data(device);
@@ -295,11 +471,25 @@ static void acpi_button_notify(struct acpi_device *device, u32 event)
 		} else {
 			int keycode = test_bit(KEY_SLEEP, input->keybit) ?
 						KEY_SLEEP : KEY_POWER;
+			bool pwr = button->type == ACPI_BUTTON_TYPE_POWER;
 
 			input_report_key(input, keycode, 1);
 			input_sync(input);
-			input_report_key(input, keycode, 0);
-			input_sync(input);
+
+			if (pwr && !button->dsm_notify
+			    && (pwrbtn_poll || button->dsm_poll)) {
+				if (start_pwrbtn_poll(button)) {
+					/* Error, fall back to
+					 * synchronous event */
+					input_report_key(input, keycode, 0);
+					input_sync(input);
+				}
+			} else if (!pwr || !button->dsm_notify) {
+				/* No release detection; emit the UP
+				 * synchronously */
+				input_report_key(input, keycode, 0);
+				input_sync(input);
+			}
 
 			pm_wakeup_event(&device->dev, 0);
 			acpi_bus_generate_netlink_event(
@@ -307,6 +497,10 @@ static void acpi_button_notify(struct acpi_device *device, u32 event)
 					dev_name(&device->dev),
 					event, ++button->pushed);
 		}
+		break;
+	case ACPI_PWRB_DSM_RELEASE:
+		input_report_key(button->input, KEY_POWER, 0);
+		input_sync(button->input);
 		break;
 	default:
 		ACPI_DEBUG_PRINT((ACPI_DB_INFO,
@@ -339,6 +533,7 @@ static int acpi_button_add(struct acpi_device *device)
 	if (!button)
 		return -ENOMEM;
 
+	button->acpi_dev = device;
 	device->driver_data = button;
 
 	button->input = input = input_allocate_device();
@@ -356,6 +551,8 @@ static int acpi_button_add(struct acpi_device *device)
 		strcpy(name, ACPI_BUTTON_DEVICE_NAME_POWER);
 		sprintf(class, "%s/%s",
 			ACPI_BUTTON_CLASS, ACPI_BUTTON_SUBCLASS_POWER);
+		pwrb_dsm_init(button);
+
 	} else if (!strcmp(hid, ACPI_BUTTON_HID_SLEEP) ||
 		   !strcmp(hid, ACPI_BUTTON_HID_SLEEPF)) {
 		button->type = ACPI_BUTTON_TYPE_SLEEP;

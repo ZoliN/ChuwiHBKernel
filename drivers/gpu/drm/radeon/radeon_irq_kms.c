@@ -79,17 +79,10 @@ static void radeon_hotplug_work_func(struct work_struct *work)
 	struct drm_mode_config *mode_config = &dev->mode_config;
 	struct drm_connector *connector;
 
-	/* we can race here at startup, some boards seem to trigger
-	 * hotplug irqs when they shouldn't. */
-	if (!rdev->mode_info.mode_config_initialized)
-		return;
-
-	mutex_lock(&mode_config->mutex);
 	if (mode_config->num_connector) {
 		list_for_each_entry(connector, &mode_config->connector_list, head)
 			radeon_connector_hotplug(connector);
 	}
-	mutex_unlock(&mode_config->mutex);
 	/* Just fire off a uevent and let userspace tell us what to do */
 	drm_helper_hpd_irq_event(dev);
 }
@@ -209,16 +202,6 @@ static bool radeon_msi_ok(struct radeon_device *rdev)
 	if (rdev->flags & RADEON_IS_AGP)
 		return false;
 
-	/*
-	 * Older chips have a HW limitation, they can only generate 40 bits
-	 * of address for "64-bit" MSIs which breaks on some platforms, notably
-	 * IBM POWER servers, so we limit them
-	 */
-	if (rdev->family < CHIP_BONAIRE) {
-		dev_info(rdev->dev, "radeon: MSI limited to 32-bit\n");
-		rdev->pdev->no_64bit_msi = 1;
-	}
-
 	/* force MSI on */
 	if (radeon_msi == 1)
 		return true;
@@ -304,7 +287,7 @@ int radeon_irq_kms_init(struct radeon_device *rdev)
 	INIT_WORK(&rdev->reset_work, radeon_irq_reset_work_func);
 
 	rdev->irq.installed = true;
-	r = drm_irq_install(rdev->ddev);
+	r = drm_irq_install(rdev->ddev, rdev->ddev->pdev->irq);
 	if (r) {
 		rdev->irq.installed = false;
 		flush_work(&rdev->hotplug_work);

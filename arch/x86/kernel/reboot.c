@@ -208,6 +208,14 @@ static struct dmi_system_id __initdata reboot_dmi_table[] = {
 			DMI_MATCH(DMI_BOARD_NAME, "P4S800"),
 		},
 	},
+	{	/* Handle problems with rebooting on ASUS T100TA */
+		.callback = set_pci_reboot,
+		.ident = "ASUS T100TA",
+		.matches = {
+			DMI_MATCH(DMI_BOARD_VENDOR, "ASUSTeK COMPUTER INC."),
+			DMI_MATCH(DMI_BOARD_NAME, "T100TA"),
+		},
+	},
 
 	/* Dell */
 	{	/* Handle problems with rebooting on Dell DXP061 */
@@ -480,11 +488,12 @@ void __attribute__((weak)) mach_reboot_fixups(void)
  *
  * 1) If the FADT has the ACPI reboot register flag set, try it
  * 2) If still alive, write to the keyboard controller
- * 3) If still alive, write to the ACPI reboot register again
- * 4) If still alive, write to the keyboard controller again
+ * 3) If still alive, call EFI runtime service
+ * 4) If still alive, write to the PCI IO port 0xCF9
+ * 5) If still alive, try (1)~(4) one time again
  *
  * If the machine is still alive at this stage, it gives up. We default to
- * following the same pattern, except that if we're still alive after (4) we'll
+ * following the same pattern, except that if we're still alive after (5) we'll
  * try to force a triple fault and then cycle between hitting the keyboard
  * controller and doing that
  */
@@ -518,7 +527,7 @@ static void native_machine_emergency_restart(void)
 			}
 			if (attempt == 0 && orig_reboot_type == BOOT_ACPI) {
 				attempt = 1;
-				reboot_type = BOOT_ACPI;
+				reboot_type = BOOT_EFI;
 			} else {
 				reboot_type = BOOT_TRIPLE;
 			}
@@ -548,7 +557,7 @@ static void native_machine_emergency_restart(void)
 						 EFI_RESET_WARM :
 						 EFI_RESET_COLD,
 						 EFI_SUCCESS, 0, NULL);
-			reboot_type = BOOT_KBD;
+			reboot_type = BOOT_CF9;
 			break;
 
 		case BOOT_CF9:
@@ -566,7 +575,7 @@ static void native_machine_emergency_restart(void)
 				outb(cf9|reboot_code, 0xcf9);
 				udelay(50);
 			}
-			reboot_type = BOOT_KBD;
+			reboot_type = BOOT_ACPI;
 			break;
 		}
 	}
@@ -643,6 +652,11 @@ static void native_machine_power_off(void)
 			machine_shutdown();
 		pm_power_off();
 	}
+
+#ifdef CONFIG_EFI
+	if (efi_enabled(EFI_RUNTIME_SERVICES))
+		efi.reset_system(EFI_RESET_SHUTDOWN, EFI_SUCCESS, 0, NULL);
+#endif
 	/* A fallback in case there is no PM info available */
 	tboot_shutdown(TB_SHUTDOWN_HALT);
 }

@@ -608,7 +608,7 @@ static int tty_signal_session_leader(struct tty_struct *tty, int exit_session)
  *		  tasklist_lock to walk task list for hangup event
  *		    ->siglock to protect ->signal/->sighand
  */
-static void __tty_hangup(struct tty_struct *tty, int exit_session)
+static void __tty_hangup(struct tty_struct *tty, int exit_session, int put_tty)
 {
 	struct file *cons_filp = NULL;
 	struct file *filp, *f = NULL;
@@ -631,6 +631,8 @@ static void __tty_hangup(struct tty_struct *tty, int exit_session)
 
 	if (test_bit(TTY_HUPPED, &tty->flags)) {
 		tty_unlock(tty);
+		if (put_tty)
+			tty_kref_put(tty);
 		return;
 	}
 
@@ -702,6 +704,8 @@ static void __tty_hangup(struct tty_struct *tty, int exit_session)
 
 	if (f)
 		fput(f);
+	if (put_tty)
+		tty_kref_put(tty);
 }
 
 static void do_tty_hangup(struct work_struct *work)
@@ -709,7 +713,7 @@ static void do_tty_hangup(struct work_struct *work)
 	struct tty_struct *tty =
 		container_of(work, struct tty_struct, hangup_work);
 
-	__tty_hangup(tty, 0);
+	__tty_hangup(tty, 0, 1);
 }
 
 /**
@@ -726,7 +730,9 @@ void tty_hangup(struct tty_struct *tty)
 	char	buf[64];
 	printk(KERN_DEBUG "%s hangup...\n", tty_name(tty, buf));
 #endif
-	schedule_work(&tty->hangup_work);
+	tty_kref_get(tty);
+	if (!schedule_work(&tty->hangup_work))
+		tty_kref_put(tty);
 }
 
 EXPORT_SYMBOL(tty_hangup);
@@ -747,7 +753,7 @@ void tty_vhangup(struct tty_struct *tty)
 
 	printk(KERN_DEBUG "%s vhangup...\n", tty_name(tty, buf));
 #endif
-	__tty_hangup(tty, 0);
+	__tty_hangup(tty, 0, 0);
 }
 
 EXPORT_SYMBOL(tty_vhangup);
@@ -788,7 +794,7 @@ static void tty_vhangup_session(struct tty_struct *tty)
 
 	printk(KERN_DEBUG "%s vhangup session...\n", tty_name(tty, buf));
 #endif
-	__tty_hangup(tty, 1);
+	__tty_hangup(tty, 1, 0);
 }
 
 /**
@@ -878,9 +884,8 @@ void disassociate_ctty(int on_exit)
 	spin_lock_irq(&current->sighand->siglock);
 	put_pid(current->signal->tty_old_pgrp);
 	current->signal->tty_old_pgrp = NULL;
-	spin_unlock_irq(&current->sighand->siglock);
 
-	tty = get_current_tty();
+	tty = tty_kref_get(current->signal->tty);
 	if (tty) {
 		unsigned long flags;
 		spin_lock_irqsave(&tty->ctrl_lock, flags);
@@ -897,6 +902,7 @@ void disassociate_ctty(int on_exit)
 #endif
 	}
 
+	spin_unlock_irq(&current->sighand->siglock);
 	/* Now clear signal->tty under the lock */
 	read_lock(&tasklist_lock);
 	session_clear_tty(task_session(current));
@@ -1622,10 +1628,12 @@ static void release_tty(struct tty_struct *tty, int idx)
 		tty->ops->shutdown(tty);
 	tty_free_termios(tty);
 	tty_driver_remove_tty(tty->driver, tty);
-	tty->port->itty = NULL;
+	if (tty->port)
+		tty->port->itty = NULL;
 	if (tty->link)
 		tty->link->port->itty = NULL;
-	cancel_work_sync(&tty->port->buf.work);
+	if (tty->port)
+		cancel_work_sync(&tty->port->buf.work);
 
 	if (tty->link)
 		tty_kref_put(tty->link);

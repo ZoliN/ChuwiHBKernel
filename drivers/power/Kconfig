@@ -8,6 +8,41 @@ menuconfig POWER_SUPPLY
 
 if POWER_SUPPLY
 
+config POWER_SUPPLY_CHARGER
+        bool "Power Supply Charger"
+        select EXTCON
+        select POWER_SUPPLY_BATTID
+        help
+          Say Y here to enable the power supply charger framework. Charger
+          framework supports charging in a generic way. This allows the charger
+          drivers to keep the charging logic outside and the charger driver
+          just need to abstract the charger hardware
+
+config POWER_SUPPLY_CHARGING_ALGO_PSE
+        bool "PSE compliant charging algorithm"
+        help
+          Say Y here to select PSE compliant charging algorithm. As per PSE
+          standard the battery characteristics and thereby the charging rates
+          can vary on different temperature zones. This config will enable PSE
+          compliant charging algorithm with maintenance charging support. The
+          algorithm can be selected by the charging framework based on the type
+          of the battery charging profile.
+
+        depends on POWER_SUPPLY_CHARGER
+
+config POWER_SUPPLY_BATTID
+        bool "Power Supply Battery Identification Framework"
+        help
+         Say Y here to enable the power supply battery idnetification
+         framework. The framework would allow different battery identification
+         drivers to interface with power supply subsystem. Also it allows consumer
+         drivers to register for notification from the power_supply subsystem.
+config RAW_CC_THROTTLE
+	bool "Raw Charge Current Throttle"
+	help
+	  Say Y here to enable raw charge current throttling. This feature will
+	  expose n states where n is defined as (max_current_mA/100_mA)
+
 config POWER_SUPPLY_DEBUG
 	bool "Power supply debug"
 	help
@@ -388,6 +423,78 @@ config BATTERY_GOLDFISH
 	help
 	  Say Y to enable support for the battery and AC power in the
 	  Goldfish emulator.
+
+config DC_XPWR_BATTERY
+	bool "Dollar Cove(Xpower) PMIC Fuel Gauge driver"
+	help
+	  Say Y here to enable support for Dollar Cove(Xpower) PMIC Fuel Gauge.
+
+config DC_XPWR_CHARGER
+	bool "Dollar Cove(Xpower) PMIC Charger driver"
+	help
+	  Say Y here to enable support for Dollar Cove(Xpower) PMIC Charger.
+
+config CHARGER_BQ24192
+	tristate "TI BQ24192/BQ24191/BQ24190 Charger"
+	select POWER_SUPPLY_CHARGER
+	depends on I2C
+	help
+	  BQ24192 is the charger chip for lithium-ion (Li+) batteries
+	  in handheld and portable equipment.
+
+	  Say Y here if you know your platform has this chip for charging
+	  support.
+
+config WIRELESS_REZENCE
+	bool "Wireless Rezence Driver"
+	help
+	  This generic driver adds support for the A4WP standard and
+	  should be built in combination of a A4WP receiver driver like
+	  the NX2A4WP driver.
+
+	  Say Y here to enable generic Wireless Rezence driver support.
+
+config REZENCE_NX2A4WP
+	bool "Rezence NX2A4WP driver"
+	select WIRELESS_REZENCE
+	depends on I2C
+	help
+	  This is a receiver driver suporting the NX2A4WP chip from NXP.
+	  This receiver supports A4WP/Rezence wireless charging technology.
+	  It include set/get property of NX2 chip.
+	  Say Y here to enable NX2A4WP rezence chip driver.
+
+config INTEL_FUEL_GAUGE
+	bool "Intel Fuel Gauge driver"
+	help
+	  SW fuel gauge has a daemon running in user space to read
+	  Coulomb counnter and calculate battery capacity and level.
+	  Say Y here to enable support for Intel SW Fuel Gauge driver.
+
+config BLE_GPIO
+	bool "Wireless BLE GPIO Driver"
+	help
+	  This handles the GPIOs of wireless charging a4wp chip during
+	  Charging OS. GPIOs for charge complete. Enable/Disable the
+	  the controller.
+
+          Say Y here to enable Wireless BLE GPIO
+          driver.
+
+config INTEL_FG_UIFACE
+	bool "Intel Fuel Gauge User Interface"
+	help
+	  This enables the sysfs interface for SW fuel gauge.
+
+	  Say Y here to enable support for Intel SW Fuel gauge Algo User
+	  Interface.
+
+config BQ24261_CHARGER
+	bool "TI BQ24261 charger driver"
+	help
+	  This enables the TI BQ24261 battery charger driver.
+
+	  Say Y here to enable support for TI BQ24261 charger driver
 
 source "drivers/power/reset/Kconfig"
 

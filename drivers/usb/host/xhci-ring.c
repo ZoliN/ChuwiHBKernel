@@ -68,6 +68,7 @@
 #include <linux/slab.h>
 #include "xhci.h"
 #include "xhci-trace.h"
+#include "xhci-intel-cap.h"
 
 static int handle_cmd_in_cmd_wait_list(struct xhci_hcd *xhci,
 		struct xhci_virt_device *virt_dev,
@@ -1740,8 +1741,27 @@ static void handle_port_status(struct xhci_hcd *xhci,
 		usb_hcd_resume_root_hub(hcd);
 	}
 
-	if (hcd->speed == HCD_USB3 && (temp & PORT_PLS_MASK) == XDEV_INACTIVE)
+	/* Check for CCS and CSC bits */
+	if ((xhci->quirks & XHCI_SSIC_DISABLE_STALL) &&
+		(faked_port_index + 1) == xhci->ssic_port_number) {
+		/* Check the bit 17 in PORTSC */
+		if (temp & PORT_CSC) {
+			/*
+			 * Check the bit 0 in PORTSC.
+			 * Disable/Enable Retrain
+			 * Timeout accordingly.
+			 */
+			if (temp & PORT_CONNECT)
+				xhci_change_ssic_regs(xhci, true);
+			else
+				xhci_change_ssic_regs(xhci, false);
+		}
+	}
+
+	if (hcd->speed == HCD_USB3 && (temp & PORT_PLS_MASK) == XDEV_INACTIVE) {
+		xhci_warn(xhci, "SS port %d goes into inactive\n", port_id);
 		bus_state->port_remote_wakeup &= ~(1 << faked_port_index);
+	}
 
 	if ((temp & PORT_PLC) && (temp & PORT_PLS_MASK) == XDEV_RESUME) {
 		xhci_dbg(xhci, "port resume event for port %d\n", port_id);
@@ -1749,6 +1769,9 @@ static void handle_port_status(struct xhci_hcd *xhci,
 		temp1 = readl(&xhci->op_regs->command);
 		if (!(temp1 & CMD_RUN)) {
 			xhci_warn(xhci, "xHC is not running.\n");
+			if (DEV_SUPERSPEED(temp))
+				set_bit(faked_port_index,
+						&bus_state->resume_pending);
 			goto cleanup;
 		}
 
@@ -2114,7 +2137,7 @@ static int process_ctrl_td(struct xhci_hcd *xhci, struct xhci_td *td,
 		if (!xhci_requires_manual_halt_cleanup(xhci,
 					ep_ctx, trb_comp_code))
 			break;
-		xhci_dbg(xhci, "TRB error code %u, "
+		xhci_err(xhci, "TRB error code %u, "
 				"halted endpoint index = %u\n",
 				trb_comp_code, ep_index);
 		/* else fall through */

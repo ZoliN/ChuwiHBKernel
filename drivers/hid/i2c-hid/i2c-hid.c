@@ -25,6 +25,7 @@
 #include <linux/delay.h>
 #include <linux/slab.h>
 #include <linux/pm.h>
+#include <linux/pm_runtime.h>
 #include <linux/device.h>
 #include <linux/wait.h>
 #include <linux/err.h>
@@ -458,9 +459,17 @@ static void i2c_hid_init_reports(struct hid_device *hid)
 		return;
 	}
 
+	/*
+	 * The device must be powered on while we fetch initial reports
+	 * from it.
+	 */
+	pm_runtime_get_sync(&client->dev);
+
 	list_for_each_entry(report,
 		&hid->report_enum[HID_FEATURE_REPORT].report_list, list)
 		i2c_hid_init_report(report, inbuf, ihid->bufsize);
+
+	pm_runtime_put(&client->dev);
 
 	kfree(inbuf);
 }
@@ -710,8 +719,8 @@ static int i2c_hid_open(struct hid_device *hid)
 
 	mutex_lock(&i2c_hid_open_mut);
 	if (!hid->open++) {
-		ret = i2c_hid_set_power(client, I2C_HID_PWR_ON);
-		if (ret) {
+		ret = pm_runtime_get_sync(&client->dev);
+		if (ret < 0) {
 			hid->open--;
 			goto done;
 		}
@@ -719,7 +728,7 @@ static int i2c_hid_open(struct hid_device *hid)
 	}
 done:
 	mutex_unlock(&i2c_hid_open_mut);
-	return ret;
+	return ret < 0 ? ret : 0;
 }
 
 static void i2c_hid_close(struct hid_device *hid)
@@ -736,7 +745,7 @@ static void i2c_hid_close(struct hid_device *hid)
 		clear_bit(I2C_HID_STARTED, &ihid->flags);
 
 		/* Save some power */
-		i2c_hid_set_power(client, I2C_HID_PWR_SLEEP);
+		pm_runtime_put(&client->dev);
 	}
 	mutex_unlock(&i2c_hid_open_mut);
 }
@@ -745,19 +754,18 @@ static int i2c_hid_power(struct hid_device *hid, int lvl)
 {
 	struct i2c_client *client = hid->driver_data;
 	struct i2c_hid *ihid = i2c_get_clientdata(client);
-	int ret = 0;
 
 	i2c_hid_dbg(ihid, "%s lvl:%d\n", __func__, lvl);
 
 	switch (lvl) {
 	case PM_HINT_FULLON:
-		ret = i2c_hid_set_power(client, I2C_HID_PWR_ON);
+		pm_runtime_get_sync(&client->dev);
 		break;
 	case PM_HINT_NORMAL:
-		ret = i2c_hid_set_power(client, I2C_HID_PWR_SLEEP);
+		pm_runtime_put(&client->dev);
 		break;
 	}
-	return ret;
+	return 0;
 }
 
 static struct hid_ll_driver i2c_hid_ll_driver = {
@@ -799,34 +807,18 @@ static int i2c_hid_fetch_hid_descriptor(struct i2c_hid *ihid)
 	unsigned int dsize;
 	int ret;
 
-	/* Fetch the length of HID description, retrieve the 4 first bytes:
+	/* i2c hid fetch using a fixed descriptor size (30 bytes) */
+	i2c_hid_dbg(ihid, "Fetching the HID descriptor\n");
+	ret = i2c_hid_command(client, &hid_descr_cmd, ihid->hdesc_buffer,
+				sizeof(struct i2c_hid_desc));
+	if (ret) {
+		dev_err(&client->dev, "hid_descr_cmd failed\n");
+		return -ENODEV;
+	}
+
+	/* Validate the length of HID descriptor, the 4 first bytes:
 	 * bytes 0-1 -> length
 	 * bytes 2-3 -> bcdVersion (has to be 1.00) */
-	ret = i2c_hid_command(client, &hid_descr_cmd, ihid->hdesc_buffer, 4);
-
-	i2c_hid_dbg(ihid, "%s, ihid->hdesc_buffer: %4ph\n", __func__,
-			ihid->hdesc_buffer);
-
-	if (ret) {
-		dev_err(&client->dev,
-			"unable to fetch the size of HID descriptor (ret=%d)\n",
-			ret);
-		return -ENODEV;
-	}
-
-	dsize = le16_to_cpu(hdesc->wHIDDescLength);
-	/*
-	 * the size of the HID descriptor should at least contain
-	 * its size and the bcdVersion (4 bytes), and should not be greater
-	 * than sizeof(struct i2c_hid_desc) as we directly fill this struct
-	 * through i2c_hid_command.
-	 */
-	if (dsize < 4 || dsize > sizeof(struct i2c_hid_desc)) {
-		dev_err(&client->dev, "weird size of HID descriptor (%u)\n",
-			dsize);
-		return -ENODEV;
-	}
-
 	/* check bcdVersion == 1.0 */
 	if (le16_to_cpu(hdesc->bcdVersion) != 0x0100) {
 		dev_err(&client->dev,
@@ -835,17 +827,14 @@ static int i2c_hid_fetch_hid_descriptor(struct i2c_hid *ihid)
 		return -ENODEV;
 	}
 
-	i2c_hid_dbg(ihid, "Fetching the HID descriptor\n");
-
-	ret = i2c_hid_command(client, &hid_descr_cmd, ihid->hdesc_buffer,
-				dsize);
-	if (ret) {
-		dev_err(&client->dev, "hid_descr_cmd Fail\n");
+	/* Descriptor length should be 30 bytes as per the specification */
+	dsize = le16_to_cpu(hdesc->wHIDDescLength);
+	if (dsize != sizeof(struct i2c_hid_desc)) {
+		dev_err(&client->dev, "weird size of HID descriptor (%u)\n",
+			dsize);
 		return -ENODEV;
 	}
-
 	i2c_hid_dbg(ihid, "HID Descriptor: %*ph\n", dsize, ihid->hdesc_buffer);
-
 	return 0;
 }
 
@@ -980,13 +969,17 @@ static int i2c_hid_probe(struct i2c_client *client,
 	if (ret < 0)
 		goto err;
 
+	pm_runtime_get_noresume(&client->dev);
+	pm_runtime_set_active(&client->dev);
+	pm_runtime_enable(&client->dev);
+
 	ret = i2c_hid_fetch_hid_descriptor(ihid);
 	if (ret < 0)
-		goto err;
+		goto err_pm;
 
 	ret = i2c_hid_init_irq(client);
 	if (ret < 0)
-		goto err;
+		goto err_pm;
 
 	hid = hid_allocate_device();
 	if (IS_ERR(hid)) {
@@ -1017,6 +1010,7 @@ static int i2c_hid_probe(struct i2c_client *client,
 		goto err_mem_free;
 	}
 
+	pm_runtime_put(&client->dev);
 	return 0;
 
 err_mem_free:
@@ -1024,6 +1018,10 @@ err_mem_free:
 
 err_irq:
 	free_irq(client->irq, ihid);
+
+err_pm:
+	pm_runtime_put_noidle(&client->dev);
+	pm_runtime_disable(&client->dev);
 
 err:
 	i2c_hid_free_buffers(ihid);
@@ -1035,6 +1033,11 @@ static int i2c_hid_remove(struct i2c_client *client)
 {
 	struct i2c_hid *ihid = i2c_get_clientdata(client);
 	struct hid_device *hid;
+
+	pm_runtime_get_sync(&client->dev);
+	pm_runtime_disable(&client->dev);
+	pm_runtime_set_suspended(&client->dev);
+	pm_runtime_put_noidle(&client->dev);
 
 	hid = ihid->hid;
 	hid_destroy_device(hid);
@@ -1081,7 +1084,31 @@ static int i2c_hid_resume(struct device *dev)
 }
 #endif
 
-static SIMPLE_DEV_PM_OPS(i2c_hid_pm, i2c_hid_suspend, i2c_hid_resume);
+#ifdef CONFIG_PM_RUNTIME
+static int i2c_hid_runtime_suspend(struct device *dev)
+{
+	struct i2c_client *client = to_i2c_client(dev);
+
+	i2c_hid_set_power(client, I2C_HID_PWR_SLEEP);
+	disable_irq(client->irq);
+	return 0;
+}
+
+static int i2c_hid_runtime_resume(struct device *dev)
+{
+	struct i2c_client *client = to_i2c_client(dev);
+
+	enable_irq(client->irq);
+	i2c_hid_set_power(client, I2C_HID_PWR_ON);
+	return 0;
+}
+#endif
+
+static const struct dev_pm_ops i2c_hid_pm = {
+	SET_SYSTEM_SLEEP_PM_OPS(i2c_hid_suspend, i2c_hid_resume)
+	SET_RUNTIME_PM_OPS(i2c_hid_runtime_suspend, i2c_hid_runtime_resume,
+			   NULL)
+};
 
 static const struct i2c_device_id i2c_hid_id_table[] = {
 	{ "hid", 0 },

@@ -26,6 +26,7 @@
  *	autonomous such as isp1504, isp1707, etc.
  */
 
+#include <linux/acpi.h>
 #include <linux/module.h>
 #include <linux/platform_device.h>
 #include <linux/dma-mapping.h>
@@ -68,26 +69,34 @@ static int nop_set_suspend(struct usb_phy *x, int suspend)
 	return 0;
 }
 
-static void nop_reset_set(struct usb_phy_gen_xceiv *nop, int asserted)
+static void nop_func_set(struct usb_phy_gen_xceiv *nop, struct gpio_desc *gpio,
+			 int asserted, int wait)
 {
-	int value;
-
-	if (!gpio_is_valid(nop->gpio_reset))
+	if (IS_ERR(gpio))
 		return;
 
-	value = asserted;
-	if (nop->reset_active_low)
-		value = !value;
+	gpiod_set_value_cansleep(gpio, asserted);
 
-	gpio_set_value_cansleep(nop->gpio_reset, value);
-
-	if (!asserted)
+	if (wait)
 		usleep_range(10000, 20000);
+}
+
+static inline void nop_reset_set(struct usb_phy_gen_xceiv *nop, int asserted)
+{
+	nop_func_set(nop, nop->gpio_reset, !asserted, !asserted);
+}
+
+static inline void nop_cs_set(struct usb_phy_gen_xceiv *nop, int asserted)
+{
+	nop_func_set(nop, nop->gpio_cs, asserted, asserted);
 }
 
 int usb_gen_phy_init(struct usb_phy *phy)
 {
 	struct usb_phy_gen_xceiv *nop = dev_get_drvdata(phy->dev);
+
+	/* Assert CS */
+	nop_cs_set(nop, 1);
 
 	if (!IS_ERR(nop->vcc)) {
 		if (regulator_enable(nop->vcc))
@@ -118,6 +127,9 @@ void usb_gen_phy_shutdown(struct usb_phy *phy)
 		if (regulator_disable(nop->vcc))
 			dev_err(phy->dev, "Failed to disable power\n");
 	}
+
+	/* De-assert CS */
+	nop_cs_set(nop, 0);
 }
 EXPORT_SYMBOL_GPL(usb_gen_phy_shutdown);
 
@@ -150,39 +162,41 @@ static int nop_set_host(struct usb_otg *otg, struct usb_bus *host)
 	return 0;
 }
 
+static int nop_set_power(struct usb_phy *phy, unsigned mA)
+{
+	/* Notify other drivers that device enumerated or not.
+	 * e.g It is needed by some charger driver, to set
+	 * charging current for SDP case */
+	atomic_notifier_call_chain(&phy->notifier,
+				   USB_EVENT_ENUMERATED, &mA);
+
+	dev_info(phy->dev, "Draw %d mA\n", mA);
+
+	return 0;
+}
+
 int usb_phy_gen_create_phy(struct device *dev, struct usb_phy_gen_xceiv *nop,
 		struct usb_phy_gen_xceiv_platform_data *pdata)
 {
 	enum usb_phy_type type = USB_PHY_TYPE_USB2;
+	struct device *gpio_dev = dev;
 	int err;
 
 	u32 clk_rate = 0;
 	bool needs_vcc = false;
 
-	nop->reset_active_low = true;	/* default behaviour */
-
 	if (dev->of_node) {
 		struct device_node *node = dev->of_node;
-		enum of_gpio_flags flags = 0;
 
 		if (of_property_read_u32(node, "clock-frequency", &clk_rate))
 			clk_rate = 0;
 
 		needs_vcc = of_property_read_bool(node, "vcc-supply");
-		nop->gpio_reset = of_get_named_gpio_flags(node, "reset-gpios",
-								0, &flags);
-		if (nop->gpio_reset == -EPROBE_DEFER)
-			return -EPROBE_DEFER;
-
-		nop->reset_active_low = flags & OF_GPIO_ACTIVE_LOW;
 
 	} else if (pdata) {
 		type = pdata->type;
 		clk_rate = pdata->clk_rate;
 		needs_vcc = pdata->needs_vcc;
-		nop->gpio_reset = pdata->gpio_reset;
-	} else {
-		nop->gpio_reset = -1;
 	}
 
 	nop->phy.otg = devm_kzalloc(dev, sizeof(*nop->phy.otg),
@@ -212,22 +226,26 @@ int usb_phy_gen_create_phy(struct device *dev, struct usb_phy_gen_xceiv *nop,
 			return -EPROBE_DEFER;
 	}
 
-	if (gpio_is_valid(nop->gpio_reset)) {
-		unsigned long gpio_flags;
+	/* HACK: use parent's ACPI companion if only available */
+	if (!ACPI_HANDLE(dev) && ACPI_HANDLE(dev->parent))
+		gpio_dev = dev->parent;
 
-		/* Assert RESET */
-		if (nop->reset_active_low)
-			gpio_flags = GPIOF_OUT_INIT_LOW;
-		else
-			gpio_flags = GPIOF_OUT_INIT_HIGH;
-
-		err = devm_gpio_request_one(dev, nop->gpio_reset,
-						gpio_flags, dev_name(dev));
-		if (err) {
-			dev_err(dev, "Error requesting RESET GPIO %d\n",
-					nop->gpio_reset);
-			return err;
+	nop->gpio_reset = devm_gpiod_get_index(gpio_dev, "reset", 0);
+	if (IS_ERR(nop->gpio_reset)) {
+		if (PTR_ERR(nop->gpio_reset) == -EPROBE_DEFER) {
+			dev_err(dev, "Error requesting RESET GPIO\n");
+			return -EPROBE_DEFER;
 		}
+		dev_info(dev, "No RESET GPIO is available\n");
+	}
+
+	nop->gpio_cs = devm_gpiod_get_index(gpio_dev, "cs", 1);
+	if (IS_ERR(nop->gpio_cs)) {
+		if (PTR_ERR(nop->gpio_cs) == -EPROBE_DEFER) {
+			dev_err(dev, "Error requesting CS GPIO\n");
+			return -EPROBE_DEFER;
+		}
+		dev_info(dev, "No CS GPIO is available\n");
 	}
 
 	nop->dev		= dev;
@@ -236,6 +254,7 @@ int usb_phy_gen_create_phy(struct device *dev, struct usb_phy_gen_xceiv *nop,
 	nop->phy.set_suspend	= nop_set_suspend;
 	nop->phy.state		= OTG_STATE_UNDEFINED;
 	nop->phy.type		= type;
+	nop->phy.set_power	= nop_set_power;
 
 	nop->phy.otg->phy		= &nop->phy;
 	nop->phy.otg->set_host		= nop_set_host;

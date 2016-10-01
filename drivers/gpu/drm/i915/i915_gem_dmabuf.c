@@ -24,13 +24,68 @@
  *	Dave Airlie <airlied@redhat.com>
  */
 #include <drm/drmP.h>
+#include <drm/i915_dmabuf.h>
 #include "i915_drv.h"
+#include "intel_drv.h"
 #include <linux/dma-buf.h>
 
 static struct drm_i915_gem_object *dma_buf_to_obj(struct dma_buf *buf)
 {
 	return to_intel_bo(buf->priv);
 }
+
+static int i915_gem_attach_dma_buf(struct dma_buf *dmabuf,
+				   struct device *dev,
+				   struct dma_buf_attachment *attach)
+{
+	struct i915_drm_dmabuf_attachment *i915_attach;
+	struct drm_gem_object *gem_obj = dmabuf->priv;
+	struct drm_i915_gem_object *obj = to_intel_bo(gem_obj);
+	struct drm_device *drm_dev = gem_obj->dev;
+	struct intel_engine_cs *ring;
+	u32 ret;
+
+	i915_attach = kzalloc(sizeof(*i915_attach), GFP_KERNEL);
+	if (!i915_attach)
+		return -ENOMEM;
+
+	mutex_lock(&drm_dev->struct_mutex);
+	ring = i915_gem_request_get_ring(obj->last_read_req);
+	ret = intel_pin_and_fence_fb_obj(drm_dev, obj, ring);
+	if (ret) {
+		drm_gem_object_unreference(&obj->base);
+		mutex_unlock(&drm_dev->struct_mutex);
+		return ret;
+	}
+
+	i915_attach->gtt_offset = i915_gem_obj_ggtt_offset(obj);
+	i915_attach->tiling_mode = obj->tiling_mode;
+	attach->priv = i915_attach;
+	mutex_unlock(&drm_dev->struct_mutex);
+	return 0;
+}
+
+static void i915_gem_detach_dma_buf(struct dma_buf *dmabuf,
+				    struct dma_buf_attachment *attach)
+{
+	struct i915_drm_dmabuf_attachment *i915_attach = attach->priv;
+	struct drm_gem_object *gem_obj = dmabuf->priv;
+	struct drm_i915_gem_object *obj = to_intel_bo(gem_obj);
+	struct drm_device *dev = gem_obj->dev;
+
+	if (!i915_attach)
+		return;
+
+	mutex_lock(&dev->struct_mutex);
+	i915_gem_object_unpin_fence(obj);
+	i915_gem_object_unpin_from_display_plane(obj);
+	drm_gem_object_unreference(&obj->base);
+	mutex_unlock(&dev->struct_mutex);
+
+	kfree(i915_attach);
+	attach->priv = NULL;
+}
+
 
 static struct sg_table *i915_gem_map_dma_buf(struct dma_buf_attachment *attachment,
 					     enum dma_data_direction dir)
@@ -161,12 +216,8 @@ static void i915_gem_dmabuf_vunmap(struct dma_buf *dma_buf, void *vaddr)
 {
 	struct drm_i915_gem_object *obj = dma_buf_to_obj(dma_buf);
 	struct drm_device *dev = obj->base.dev;
-	int ret;
 
-	ret = i915_mutex_lock_interruptible(dev);
-	if (ret)
-		return;
-
+	mutex_lock(&dev->struct_mutex);
 	if (--obj->vmapping_count == 0) {
 		vunmap(obj->dma_buf_vmapping);
 		obj->dma_buf_vmapping = NULL;
@@ -197,7 +248,21 @@ static void i915_gem_dmabuf_kunmap(struct dma_buf *dma_buf, unsigned long page_n
 
 static int i915_gem_dmabuf_mmap(struct dma_buf *dma_buf, struct vm_area_struct *vma)
 {
-	return -EINVAL;
+	int ret = 0;
+	struct drm_i915_gem_object *obj = dma_buf_to_obj(dma_buf);
+	struct drm_device *dev = obj->base.dev;
+
+	if (!obj->base.filp) {
+		ret = -EINVAL;
+		goto out;
+	}
+
+	mutex_lock(&dev->struct_mutex);
+	ret = drm_gem_mmap_obj(&obj->base, obj->base.size, vma);
+	mutex_unlock(&dev->struct_mutex);
+
+out:
+	return ret;
 }
 
 static int i915_gem_begin_cpu_access(struct dma_buf *dma_buf, size_t start, size_t length, enum dma_data_direction direction)
@@ -217,6 +282,8 @@ static int i915_gem_begin_cpu_access(struct dma_buf *dma_buf, size_t start, size
 }
 
 static const struct dma_buf_ops i915_dmabuf_ops =  {
+	.attach = i915_gem_attach_dma_buf,
+	.detach = i915_gem_detach_dma_buf,
 	.map_dma_buf = i915_gem_map_dma_buf,
 	.unmap_dma_buf = i915_gem_unmap_dma_buf,
 	.release = drm_gem_dmabuf_release,
@@ -233,6 +300,14 @@ static const struct dma_buf_ops i915_dmabuf_ops =  {
 struct dma_buf *i915_gem_prime_export(struct drm_device *dev,
 				      struct drm_gem_object *gem_obj, int flags)
 {
+	struct drm_i915_gem_object *obj = to_intel_bo(gem_obj);
+
+	if (obj->ops->dmabuf_export) {
+		int ret = obj->ops->dmabuf_export(obj);
+		if (ret)
+			return ERR_PTR(ret);
+	}
+
 	return dma_buf_export(gem_obj, &i915_dmabuf_ops, gem_obj->size, flags);
 }
 

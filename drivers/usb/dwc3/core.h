@@ -26,6 +26,7 @@
 #include <linux/dma-mapping.h>
 #include <linux/mm.h>
 #include <linux/debugfs.h>
+#include <linux/workqueue.h>
 
 #include <linux/usb/ch9.h>
 #include <linux/usb/gadget.h>
@@ -142,6 +143,10 @@
 /* Bit fields */
 
 /* Global Configuration Register */
+#define DWC3_GRXTHRCFG_USBRXPKTCNTSEL		(1 << 29)
+#define DWC3_GRXTHRCFG_USBRXPKTCNT_MASK		(0xf << 24)
+#define DWC3_GRXTHRCFG_USBMAXRXBURSTSIZE_MASK	(0x1f << 19)
+
 #define DWC3_GCTL_PWRDNSCALE(n)	((n) << 19)
 #define DWC3_GCTL_U2RSTECN	(1 << 16)
 #define DWC3_GCTL_RAMCLKSEL(x)	(((x) & DWC3_GCTL_CLK_MASK) << 6)
@@ -170,6 +175,7 @@
 /* Global USB3 PIPE Control Register */
 #define DWC3_GUSB3PIPECTL_PHYSOFTRST	(1 << 31)
 #define DWC3_GUSB3PIPECTL_SUSPHY	(1 << 17)
+#define DWC3_GUSB3PIPECTL_P3P2TRANOK	(1 << 11)
 
 /* Global TX Fifo Size Register */
 #define DWC3_GTXFIFOSIZ_TXFDEF(n)	((n) & 0xffff)
@@ -208,6 +214,7 @@
 #define DWC3_DCTL_RUN_STOP	(1 << 31)
 #define DWC3_DCTL_CSFTRST	(1 << 30)
 #define DWC3_DCTL_LSFTRST	(1 << 29)
+#define DWC3_DCTL_L1_NYET_TRESH	(0xF << 20)
 
 #define DWC3_DCTL_HIRD_THRES_MASK	(0x1f << 24)
 #define DWC3_DCTL_HIRD_THRES(n)	((n) << 24)
@@ -398,6 +405,7 @@ struct dwc3_event_buffer {
  * @number: endpoint number (1 - 15)
  * @type: set to bmAttributes & USB_ENDPOINT_XFERTYPE_MASK
  * @resource_index: Resource transfer index
+ * @current_uf: Current uf received through last event parameter
  * @interval: the interval on which the ISOC transfer is started
  * @name: a human readable name e.g. ep1out-bulk
  * @direction: true for TX, false for RX
@@ -431,6 +439,7 @@ struct dwc3_ep {
 	u8			number;
 	u8			type;
 	u8			resource_index;
+	u16			current_uf;
 	u32			interval;
 
 	char			name[20];
@@ -730,6 +739,16 @@ struct dwc3 {
 
 	u8			test_mode;
 	u8			test_mode_nr;
+
+	bool			runtime_suspend;
+	bool			ulpi_phy;
+	struct notifier_block	nb;
+	atomic_t		suspend_depth;
+
+	struct delayed_work	watchdog;
+	int			dpm_pulled_down;
+
+	unsigned int		quirks;
 };
 
 /* -------------------------------------------------------------------------- */
@@ -880,6 +899,9 @@ struct dwc3_gadget_ep_cmd_params {
 /* prototypes */
 void dwc3_set_mode(struct dwc3 *dwc, u32 mode);
 int dwc3_gadget_resize_tx_fifos(struct dwc3 *dwc);
+
+/* remove me when ulpi bus is exported to usb phy */
+void dwc3_set_phy_dpm_pulldown(struct dwc3 *dwc, int pull_down);
 
 #if IS_ENABLED(CONFIG_USB_DWC3_HOST) || IS_ENABLED(CONFIG_USB_DWC3_DUAL_ROLE)
 int dwc3_host_init(struct dwc3 *dwc);

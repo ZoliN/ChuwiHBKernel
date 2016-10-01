@@ -15,6 +15,14 @@ config USB_OTG_FSM
 	  Implements OTG Final State Machine as specified in On-The-Go
 	  and Embedded Host Supplement to the USB Revision 2.0 Specification.
 
+config USB_OTG_WAKELOCK
+	bool "Hold a wakelock when USB connected"
+	depends on WAKELOCK
+	select USB_OTG_UTILS
+	help
+	  Select this to automatically hold a wakelock when USB is
+	  connected, preventing suspend.
+
 #
 # USB Transceiver Drivers
 #
@@ -264,5 +272,14 @@ config USB_ULPI_VIEWPORT
 	help
 	  Provides read/write operations to the ULPI phy register set for
 	  controllers with a viewport register (e.g. Chipidea/ARC controllers).
+
+config INTEL_CHT_PHY
+	bool "Intel CherryTrail OTG Transceiver Driver"
+	depends on USB_OTG_FSM
+	select USB_OTG
+	select USB_PHY
+	help
+	  Enable this to support Intel USB OTG transceiver for CherryTrail/Broxton
+          platforms.
 
 endmenu

@@ -65,3 +65,6 @@ obj-$(CONFIG_XILLYBUS)		+= xillybus/
 obj-$(CONFIG_DGNC)			+= dgnc/
 obj-$(CONFIG_DGAP)			+= dgap/
 obj-$(CONFIG_MTD_SPINAND_MT29F)	+= mt29f_spinand/
+obj-$(CONFIG_ANDROID_NFC_PN544)		+= pn544/
+obj-$(CONFIG_MDM_CTRL)		+= modem_control/
+obj-$(CONFIG_ANDROID_NFC_FDP)	+= fdp/

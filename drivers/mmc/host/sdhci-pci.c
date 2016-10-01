@@ -206,7 +206,7 @@ static int mfd_emmc_probe_slot(struct sdhci_pci_slot *slot)
 {
 	slot->host->mmc->caps |= MMC_CAP_8_BIT_DATA | MMC_CAP_NONREMOVABLE;
 	slot->host->mmc->caps2 |= MMC_CAP2_BOOTPART_NOACC |
-				  MMC_CAP2_HC_ERASE_SZ;
+				  MMC_CAP2_HC_ERASE_SZ | MMC_CAP2_POLL_R1B_BUSY;
 	return 0;
 }
 
@@ -269,7 +269,7 @@ static int byt_emmc_probe_slot(struct sdhci_pci_slot *slot)
 {
 	slot->host->mmc->caps |= MMC_CAP_8_BIT_DATA | MMC_CAP_NONREMOVABLE |
 				 MMC_CAP_HW_RESET;
-	slot->host->mmc->caps2 |= MMC_CAP2_HC_ERASE_SZ;
+	slot->host->mmc->caps2 |= MMC_CAP2_HC_ERASE_SZ | MMC_CAP2_POLL_R1B_BUSY;
 	slot->hw_reset = sdhci_pci_int_hw_reset;
 	return 0;
 }
@@ -1121,18 +1121,13 @@ static int sdhci_pci_suspend(struct device *dev)
 			goto err_pci_suspend;
 	}
 
-	pci_save_state(pdev);
 	if (pm_flags & MMC_PM_KEEP_POWER) {
-		if (pm_flags & MMC_PM_WAKE_SDIO_IRQ) {
-			pci_pme_active(pdev, true);
-			pci_enable_wake(pdev, PCI_D3hot, 1);
-		}
-		pci_set_power_state(pdev, PCI_D3hot);
-	} else {
-		pci_enable_wake(pdev, PCI_D3hot, 0);
-		pci_disable_device(pdev);
-		pci_set_power_state(pdev, PCI_D3hot);
-	}
+		if (pm_flags & MMC_PM_WAKE_SDIO_IRQ)
+			device_init_wakeup(dev, true);
+		else
+			device_init_wakeup(dev, false);
+	} else
+		device_init_wakeup(dev, false);
 
 	return 0;
 
@@ -1152,12 +1147,6 @@ static int sdhci_pci_resume(struct device *dev)
 	chip = pci_get_drvdata(pdev);
 	if (!chip)
 		return 0;
-
-	pci_set_power_state(pdev, PCI_D0);
-	pci_restore_state(pdev);
-	ret = pci_enable_device(pdev);
-	if (ret)
-		return ret;
 
 	if (chip->fixes && chip->fixes->resume) {
 		ret = chip->fixes->resume(chip);
@@ -1453,7 +1442,6 @@ static void sdhci_pci_runtime_pm_allow(struct device *dev)
 	pm_runtime_allow(dev);
 	pm_runtime_set_autosuspend_delay(dev, 50);
 	pm_runtime_use_autosuspend(dev);
-	pm_suspend_ignore_children(dev, 1);
 }
 
 static void sdhci_pci_runtime_pm_forbid(struct device *dev)

@@ -24,4 +24,10 @@ struct dwc3_platform_data {
 	enum usb_device_speed maximum_speed;
 	enum usb_dr_mode dr_mode;
 	bool tx_fifo_resize;
+	bool runtime_suspend;
+	bool ulpi_phy;
+	unsigned int quirks;
+
+/* Core transitions directly between PHY power state P2 and P3*/
+#define DWC3_QUIRK_P3P2TRAN_OK				(1 << 0)
 };

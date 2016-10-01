@@ -40,6 +40,8 @@ struct mmc_command {
 #define MMC_RSP_SPI_B4	(1 << 9)		/* four data bytes */
 #define MMC_RSP_SPI_BUSY (1 << 10)		/* card may send busy */
 
+#define MMC_SKIP_TUNING (1 << 11)		/* skip tuning for this cmd */
+
 /*
  * These are the native response types, and correspond to valid bit
  * patterns of the above flags.  One additional valid pattern
@@ -127,8 +129,10 @@ struct mmc_data {
 
 struct mmc_host;
 struct mmc_request {
-	struct mmc_command	*sbc;		/* SET_BLOCK_COUNT for multiblock */
+	struct mmc_command	*precmd;
 	struct mmc_command	*cmd;
+	struct mmc_command	*postcmd;
+	struct mmc_command	*cmd2;
 	struct mmc_data		*data;
 	struct mmc_command	*stop;
 
@@ -144,6 +148,7 @@ extern int mmc_stop_bkops(struct mmc_card *);
 extern int mmc_read_bkops_status(struct mmc_card *);
 extern struct mmc_async_req *mmc_start_req(struct mmc_host *,
 					   struct mmc_async_req *, int *);
+extern int mmc_execute_cmdq(struct mmc_host *, struct mmc_async_req *, int *);
 extern int mmc_interrupt_hpi(struct mmc_card *);
 extern void mmc_wait_for_req(struct mmc_host *, struct mmc_request *);
 extern int mmc_wait_for_cmd(struct mmc_host *, struct mmc_command *, int);
@@ -183,6 +188,7 @@ extern int mmc_set_blockcount(struct mmc_card *card, unsigned int blockcount,
 extern int mmc_hw_reset(struct mmc_host *host);
 extern int mmc_hw_reset_check(struct mmc_host *host);
 extern int mmc_can_reset(struct mmc_card *card);
+extern int mmc_do_reset(struct mmc_host *host);
 
 extern void mmc_set_data_timeout(struct mmc_data *, const struct mmc_card *);
 extern unsigned int mmc_align_data_size(struct mmc_card *, unsigned int);
@@ -211,5 +217,7 @@ static inline void mmc_claim_host(struct mmc_host *host)
 struct device_node;
 extern u32 mmc_vddrange_to_ocrmask(int vdd_min, int vdd_max);
 extern int mmc_of_parse_voltage(struct device_node *np, u32 *mask);
+
+extern int mmc_busy_wait(struct mmc_host *host);
 
 #endif /* LINUX_MMC_CORE_H */

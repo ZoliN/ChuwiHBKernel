@@ -25,8 +25,11 @@
 #include <linux/sched.h>
 #include <linux/ktime.h>
 #include <linux/mm.h>
+#include <linux/pm_runtime.h>
 #include <asm/dma.h>	/* isa_dma_bridge_buggy */
 #include "pci.h"
+#include <linux/usb.h>
+#include <linux/usb/hcd.h>
 
 /*
  * Decoding should be disabled for a PCI device during BAR sizing to avoid
@@ -2909,6 +2912,66 @@ static void quirk_intel_ntb(struct pci_dev *dev)
 DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL, 0x0e08, quirk_intel_ntb);
 DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL, 0x0e0d, quirk_intel_ntb);
 
+#define BOOT_MODE_CHARGER "androidboot.mode=charger"
+
+static bool is_it_charger_mode(void)
+{
+	if (strstr(saved_command_line, BOOT_MODE_CHARGER))
+		return true;
+	else
+		return false;
+}
+
+static int pci_disable_dev_pme_poll(struct pci_dev *pdev, void *data)
+{
+	pdev->pme_poll = false;
+	return 0;
+}
+
+/*PCIe port 0 on Cherryview should support runtime PM*/
+static void quirk_pcie_enable_rtpm(struct pci_dev *dev)
+{
+	bool charger_mode = false;
+
+	dev_info(&dev->dev, "enable runtime PM\n");
+	/* if boot mode is charger OS ignore the children for PCIE0 */
+	charger_mode = is_it_charger_mode();
+	if (charger_mode) {
+		pm_suspend_ignore_children(&dev->dev, true);
+		pci_walk_bus(dev->subordinate, pci_disable_dev_pme_poll, NULL);
+	}
+	pm_runtime_put_noidle(&dev->dev);
+	pm_runtime_allow(&dev->dev);
+}
+DECLARE_PCI_FIXUP_ENABLE(PCI_VENDOR_ID_INTEL,
+	PCI_DEVICE_ID_INTEL_CHV_PCIe_0, quirk_pcie_enable_rtpm);
+
+/*PCIEe port 1 on Cherryview should support runtime PM and ignore children*/
+static void quirk_pcie_enable_rtpm_ignore_children(struct pci_dev *dev)
+{
+	dev_info(&dev->dev, "enable runtime PM and ignore children\n");
+	pm_suspend_ignore_children(&dev->dev, true);
+	/*
+	 * If any subordinate device needs pme poll, we should keep
+	 * the port in D0, because we need port in D0 to poll it.
+	 * But for this special case, we need this PCIe port enter D3
+	 * no matter the status of child device.
+	 * Set device pme_poll as false.
+	 */
+	pci_walk_bus(dev->subordinate, pci_disable_dev_pme_poll, NULL);
+	pm_runtime_put_noidle(&dev->dev);
+	pm_runtime_allow(&dev->dev);
+}
+
+DECLARE_PCI_FIXUP_ENABLE(PCI_VENDOR_ID_INTEL,
+	PCI_DEVICE_ID_INTEL_CHV_PCIe_1, quirk_pcie_enable_rtpm_ignore_children);
+
+static void quirk_disable_pme_poll(struct pci_dev *dev)
+{
+	pci_disable_dev_pme_poll(dev, NULL);
+}
+DECLARE_PCI_FIXUP_ENABLE(PCI_VENDOR_ID_INTEL, 0x22b5, quirk_disable_pme_poll);
+
 static ktime_t fixup_debug_start(struct pci_dev *dev,
 				 void (*fn)(struct pci_dev *dev))
 {
@@ -2996,6 +3059,21 @@ DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_INTEL, 0x8c26, quirk_remove_d3_delay);
 DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_INTEL, 0x8c4e, quirk_remove_d3_delay);
 DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_INTEL, 0x8c02, quirk_remove_d3_delay);
 DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_INTEL, 0x8c22, quirk_remove_d3_delay);
+/*
+ * PCI devices which are on Intel BYT-T systems can skip the 10ms delay before
+ * entering D3 mode, but do require a delay. In this case, 3ms is enough time
+ * properly move the devices around
+*/
+static void quirk_remove_byt_d3_delay(struct pci_dev *dev)
+{
+	dev->d3_delay = 3;
+	dev->d3cold_delay = 3;
+}
+DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_INTEL, 0x0f00, quirk_remove_byt_d3_delay);
+DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_INTEL, 0x0f35, quirk_remove_byt_d3_delay);
+DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_INTEL, 0x0f37, quirk_remove_byt_d3_delay);
+DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_INTEL, 0x0f18, quirk_remove_byt_d3_delay);
+DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_INTEL, 0x0f1c, quirk_remove_byt_d3_delay);
 
 /*
  * Some devices may pass our check in pci_intx_mask_supported if
@@ -3499,3 +3577,86 @@ int pci_dev_specific_acs_enabled(struct pci_dev *dev, u16 acs_flags)
 
 	return -ENOTTY;
 }
+
+#define PCI_USH_SSCFG1		0xb0
+#define PCI_USH_SSCFG1_D3	BIT(28)
+#define PCI_USH_SSCFG1_SUS	BIT(30)
+
+#define PCI_USH_OP_OFFSET	0x80
+#define PCI_USH_OP_PORTSC_OFFSET	0x400
+#define PCI_USH_OP_PORTSC_CCS	BIT(0)
+#define PCI_USH_MAX_PORTS	4
+
+static void quirk_byt_ush_suspend(struct pci_dev *dev)
+{
+	struct usb_hcd	*hcd;
+	u32	portsc;
+	u32	value;
+	int	port_index = 0;
+	int	usb_attached = 0;
+
+	dev_dbg(&dev->dev, "USH suspend quirk\n");
+
+	hcd = pci_get_drvdata(dev);
+	if (!hcd)
+		return;
+
+	/*
+	 * Check if anything attached on USB ports,
+	 * FIXME: may need to check HSIC ports.
+	 */
+	while (port_index < PCI_USH_MAX_PORTS) {
+		portsc = readl(hcd->regs + PCI_USH_OP_OFFSET +
+				PCI_USH_OP_PORTSC_OFFSET +
+				port_index * 0x10);
+		if (portsc & PCI_USH_OP_PORTSC_CCS) {
+			pr_info("XHCI: port %d, portsc 0x%x\n",
+				port_index, portsc);
+			usb_attached = 1;
+			break;
+		}
+		port_index++;
+	}
+
+	pci_read_config_dword(dev, PCI_USH_SSCFG1, &value);
+
+	/*
+	 * set SSCFG1 BIT 28 and 30 before enter D3hot
+	 * if USB attached, then we can not turn off SUS
+	 */
+	if (usb_attached)
+		value |= PCI_USH_SSCFG1_D3;
+	else
+		value |= (PCI_USH_SSCFG1_D3 | PCI_USH_SSCFG1_SUS);
+	pci_write_config_dword(dev, PCI_USH_SSCFG1, value);
+
+	pci_read_config_dword(dev, PCI_USH_SSCFG1, &value);
+	dev_dbg(&dev->dev, "PCI B0 reg (SSCFG1) = 0x%x\n", value);
+}
+DECLARE_PCI_FIXUP_SUSPEND(PCI_VENDOR_ID_INTEL, PCI_DEVICE_ID_INTEL_BYT_USH,
+			quirk_byt_ush_suspend);
+
+static void quirk_byt_ush_resume(struct pci_dev *dev)
+{
+	u32	value;
+
+	dev_dbg(&dev->dev, "USH resume quirk\n");
+	pci_read_config_dword(dev, PCI_USH_SSCFG1, &value);
+
+	/* clear SSCFG1 BIT 28 and 30 after back to D0 */
+	value &= (~(PCI_USH_SSCFG1_D3 | PCI_USH_SSCFG1_SUS));
+	pci_write_config_dword(dev, PCI_USH_SSCFG1, value);
+
+	pci_read_config_dword(dev, PCI_USH_SSCFG1, &value);
+	dev_dbg(&dev->dev, "PCI B0 reg (SSCFG1) = 0x%x\n", value);
+}
+DECLARE_PCI_FIXUP_RESUME(PCI_VENDOR_ID_INTEL, PCI_DEVICE_ID_INTEL_BYT_USH,
+			quirk_byt_ush_resume);
+
+static void quirk_byt_ush_run_wake(struct pci_dev *pci_dev)
+{
+	dev_dbg(&pci_dev->dev, "set run wake flag\n");
+	device_set_run_wake(&pci_dev->dev, true);
+}
+DECLARE_PCI_FIXUP_EARLY(PCI_VENDOR_ID_INTEL, PCI_DEVICE_ID_INTEL_BYT_USH,
+			quirk_byt_ush_run_wake);

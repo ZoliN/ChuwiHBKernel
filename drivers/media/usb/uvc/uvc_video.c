@@ -1192,7 +1192,9 @@ static void uvc_video_decode_bulk(struct urb *urb, struct uvc_streaming *stream,
 	struct uvc_buffer *buf)
 {
 	u8 *mem;
+	u8 *payload_start;
 	int len, ret;
+	bool end_of_payload;
 
 	/*
 	 * Ignore ZLPs if they're not part of a frame, otherwise process them
@@ -1202,6 +1204,7 @@ static void uvc_video_decode_bulk(struct urb *urb, struct uvc_streaming *stream,
 		return;
 
 	mem = urb->transfer_buffer;
+	payload_start = mem;
 	len = urb->actual_length;
 	stream->bulk.payload_size += len;
 
@@ -1233,21 +1236,52 @@ static void uvc_video_decode_bulk(struct urb *urb, struct uvc_streaming *stream,
 	 * sure buf is never dereferenced if NULL.
 	 */
 
-	/* Process video data. */
-	if (!stream->bulk.skip_payload && buf != NULL)
-		uvc_video_decode_data(stream, buf, mem, len);
-
 	/* Detect the payload end by a URB smaller than the maximum size (or
 	 * a payload size equal to the maximum) and process the header again.
 	 */
-	if (urb->actual_length < urb->transfer_buffer_length ||
-	    stream->bulk.payload_size >= stream->bulk.max_payload_size) {
+
+	if ((stream->dev->quirks & UVC_QUIRK_ALT_JPEG_PAYLOAD) &&
+	    (stream->cur_format->type == UVC_VS_FORMAT_MJPEG)) {
+		end_of_payload = (urb->actual_length == 14) &&
+			(payload_start[0] == 12);
+		uvc_trace(UVC_TRACE_FRAME, "Using alt JPEG quirk. EOP = %d\n",
+			  end_of_payload);
+		if (end_of_payload) {
+			mem += payload_start[0];
+			len -= payload_start[0];
+		}
+	} else {
+		end_of_payload =
+			urb->actual_length < urb->transfer_buffer_length ||
+			stream->bulk.payload_size >=
+			stream->bulk.max_payload_size;
+	}
+
+	if (!stream->bulk.skip_payload && buf != NULL)
+		uvc_video_decode_data(stream, buf, mem, len);
+
+	if (end_of_payload) {
 		if (!stream->bulk.skip_payload && buf != NULL) {
-			uvc_video_decode_end(stream, buf, stream->bulk.header,
-				stream->bulk.payload_size);
-			if (buf->state == UVC_BUF_STATE_READY)
+			if ((stream->dev->quirks &
+			     UVC_QUIRK_ALT_JPEG_PAYLOAD) &&
+			    (stream->cur_format->type == UVC_VS_FORMAT_MJPEG)) {
+				if (urb->actual_length > 1)
+					uvc_video_decode_end(
+						stream, buf,
+						payload_start,
+						urb->actual_length);
+			} else {
+				uvc_video_decode_end(stream, buf,
+						     stream->bulk.header,
+						     stream->bulk.payload_size);
+			}
+			if (buf->state == UVC_BUF_STATE_READY) {
+				if (stream->dev->quirks & UVC_QUIRK_APPEND_UVC_HEADER)
+						uvc_video_decode_data(stream, buf, stream->bulk.header,
+									   stream->bulk.header_size);
 				buf = uvc_queue_next_buffer(&stream->queue,
 							    buf);
+			}
 		}
 
 		stream->bulk.header_size = 0;
@@ -1346,7 +1380,7 @@ static void uvc_free_urb_buffers(struct uvc_streaming *stream)
 {
 	unsigned int i;
 
-	for (i = 0; i < UVC_URBS; ++i) {
+	for (i = 0; i < uvc_urbs_param; ++i) {
 		if (stream->urb_buffer[i]) {
 #ifndef CONFIG_DMA_NONCOHERENT
 			usb_free_coherent(stream->dev->udev, stream->urb_size,
@@ -1391,7 +1425,7 @@ static int uvc_alloc_urb_buffers(struct uvc_streaming *stream,
 
 	/* Retry allocations until one succeed. */
 	for (; npackets > 1; npackets /= 2) {
-		for (i = 0; i < UVC_URBS; ++i) {
+		for (i = 0; i < uvc_urbs_param; ++i) {
 			stream->urb_size = psize * npackets;
 #ifndef CONFIG_DMA_NONCOHERENT
 			stream->urb_buffer[i] = usb_alloc_coherent(
@@ -1407,9 +1441,9 @@ static int uvc_alloc_urb_buffers(struct uvc_streaming *stream,
 			}
 		}
 
-		if (i == UVC_URBS) {
+		if (i == uvc_urbs_param) {
 			uvc_trace(UVC_TRACE_VIDEO, "Allocated %u URB buffers "
-				"of %ux%u bytes each.\n", UVC_URBS, npackets,
+				"of %ux%u bytes each.\n", uvc_urbs_param, npackets,
 				psize);
 			return npackets;
 		}
@@ -1430,7 +1464,7 @@ static void uvc_uninit_video(struct uvc_streaming *stream, int free_buffers)
 
 	uvc_video_stats_stop(stream);
 
-	for (i = 0; i < UVC_URBS; ++i) {
+	for (i = 0; i < uvc_urbs_param; ++i) {
 		urb = stream->urb[i];
 		if (urb == NULL)
 			continue;
@@ -1485,7 +1519,7 @@ static int uvc_init_video_isoc(struct uvc_streaming *stream,
 
 	size = npackets * psize;
 
-	for (i = 0; i < UVC_URBS; ++i) {
+	for (i = 0; i < uvc_urbs_param; ++i) {
 		urb = usb_alloc_urb(npackets, gfp_flags);
 		if (urb == NULL) {
 			uvc_uninit_video(stream, 1);
@@ -1551,7 +1585,7 @@ static int uvc_init_video_bulk(struct uvc_streaming *stream,
 	if (stream->type == V4L2_BUF_TYPE_VIDEO_OUTPUT)
 		size = 0;
 
-	for (i = 0; i < UVC_URBS; ++i) {
+	for (i = 0; i < uvc_urbs_param; ++i) {
 		urb = usb_alloc_urb(0, gfp_flags);
 		if (urb == NULL) {
 			uvc_uninit_video(stream, 1);
@@ -1656,7 +1690,7 @@ static int uvc_init_video(struct uvc_streaming *stream, gfp_t gfp_flags)
 		return ret;
 
 	/* Submit the URBs. */
-	for (i = 0; i < UVC_URBS; ++i) {
+	for (i = 0; i < uvc_urbs_param; ++i) {
 		ret = usb_submit_urb(stream->urb[i], gfp_flags);
 		if (ret < 0) {
 			uvc_printk(KERN_ERR, "Failed to submit URB %u "
@@ -1715,14 +1749,14 @@ int uvc_video_resume(struct uvc_streaming *stream, int reset)
 
 	uvc_video_clock_reset(stream);
 
+	if (!uvc_queue_streaming(&stream->queue))
+		return 0;
+
 	ret = uvc_commit_video(stream, &stream->ctrl);
 	if (ret < 0) {
 		uvc_queue_enable(&stream->queue, 0);
 		return ret;
 	}
-
-	if (!uvc_queue_streaming(&stream->queue))
-		return 0;
 
 	ret = uvc_init_video(stream, GFP_NOIO);
 	if (ret < 0)

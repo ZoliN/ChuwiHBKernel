@@ -132,6 +132,8 @@ struct usb_ep_ops {
 	int (*queue) (struct usb_ep *ep, struct usb_request *req,
 		gfp_t gfp_flags);
 	int (*dequeue) (struct usb_ep *ep, struct usb_request *req);
+	int (*dequeue_forced)(struct usb_ep *ep,
+		struct usb_request *req, int forced);
 
 	int (*set_halt) (struct usb_ep *ep, int value);
 	int (*set_wedge) (struct usb_ep *ep);
@@ -357,6 +359,30 @@ static inline int usb_ep_queue(struct usb_ep *ep,
 static inline int usb_ep_dequeue(struct usb_ep *ep, struct usb_request *req)
 {
 	return ep->ops->dequeue(ep, req);
+}
+
+/**
+ * usb_ep_dequeue_forced - dequeues with forced flag
+ * @ep:the endpoint associated with the request
+ * @req:the request being canceled
+ * @forced:the flag to force END command
+ *
+ * Some usb driver may send END command at dequeue. But at dequeue, some usb
+ * hardware can't process END command clearly if the req has been START, usb
+ * component might stop working after END command. Without forced flag, caller
+ * need wait for some time to make sure hardware finishes the request.
+ */
+static inline int usb_ep_dequeue_forced(struct usb_ep *ep,
+					struct usb_request *req, int forced)
+{
+	int ret;
+
+	if (ep->ops->dequeue_forced)
+		ret = ep->ops->dequeue_forced(ep, req, forced);
+	else
+		ret = ep->ops->dequeue(ep, req);
+
+	return ret;
 }
 
 /**
@@ -800,6 +826,7 @@ static inline int usb_gadget_disconnect(struct usb_gadget *gadget)
  * struct usb_gadget_driver - driver for usb 'slave' devices
  * @function: String describing the gadget's function
  * @max_speed: Highest speed the driver handles.
+ * @reset: Invoked when host reset device.
  * @setup: Invoked for ep0 control requests that aren't handled by
  *	the hardware level driver. Most calls must be handled by
  *	the gadget driver, including descriptor and configuration
@@ -868,6 +895,7 @@ struct usb_gadget_driver {
 	int			(*bind)(struct usb_gadget *gadget,
 					struct usb_gadget_driver *driver);
 	void			(*unbind)(struct usb_gadget *);
+	void			(*reset)(struct usb_gadget *);
 	int			(*setup)(struct usb_gadget *,
 					const struct usb_ctrlrequest *);
 	void			(*disconnect)(struct usb_gadget *);

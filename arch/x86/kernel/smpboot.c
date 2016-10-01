@@ -708,11 +708,15 @@ wakeup_cpu_via_init_nmi(int cpu, unsigned long start_ip, int apicid,
 	int id;
 	int boot_error;
 
+	preempt_disable();
+
 	/*
 	 * Wake up AP by INIT, INIT, STARTUP sequence.
 	 */
-	if (cpu)
-		return wakeup_secondary_cpu_via_init(apicid, start_ip);
+	if (cpu) {
+		boot_error = wakeup_secondary_cpu_via_init(apicid, start_ip);
+		goto out;
+	}
 
 	/*
 	 * Wake up BSP by nmi.
@@ -731,6 +735,9 @@ wakeup_cpu_via_init_nmi(int cpu, unsigned long start_ip, int apicid,
 			id = apicid;
 		boot_error = wakeup_secondary_cpu_via_nmi(id, start_ip);
 	}
+
+out:
+	preempt_enable();
 
 	return boot_error;
 }
@@ -1412,8 +1419,7 @@ static inline void mwait_play_dead(void)
 				highest_subcstate = edx & MWAIT_SUBSTATE_MASK;
 			}
 		}
-		eax = (highest_cstate << MWAIT_SUBSTATE_SIZE) |
-			(highest_subcstate - 1);
+		eax = (highest_cstate << MWAIT_SUBSTATE_SIZE) | 4;
 	}
 
 	/*
@@ -1422,7 +1428,6 @@ static inline void mwait_play_dead(void)
 	 * content is immaterial as it is not actually modified in any way.
 	 */
 	mwait_ptr = &current_thread_info()->flags;
-
 	wbinvd();
 
 	while (1) {

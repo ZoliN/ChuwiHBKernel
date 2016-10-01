@@ -30,18 +30,6 @@ static int pxa2xx_spi_map_dma_buffer(struct driver_data *drv_data,
 	struct sg_table *sgt;
 	void *buf, *pbuf;
 
-	/*
-	 * Some DMA controllers have problems transferring buffers that are
-	 * not multiple of 4 bytes. So we truncate the transfer so that it
-	 * is suitable for such controllers, and handle the trailing bytes
-	 * manually after the DMA completes.
-	 *
-	 * REVISIT: It would be better if this information could be
-	 * retrieved directly from the DMA device in a similar way than
-	 * ->copy_align etc. is done.
-	 */
-	len = ALIGN(drv_data->len, 4);
-
 	if (dir == DMA_TO_DEVICE) {
 		dmadev = drv_data->tx_chan->device->dev;
 		sgt = &drv_data->tx_sgt;
@@ -145,12 +133,8 @@ static void pxa2xx_spi_dma_transfer_complete(struct driver_data *drv_data,
 		if (!error) {
 			pxa2xx_spi_unmap_dma_buffers(drv_data);
 
-			/* Handle the last bytes of unaligned transfer */
 			drv_data->tx += drv_data->tx_map_len;
-			drv_data->write(drv_data);
-
 			drv_data->rx += drv_data->rx_map_len;
-			drv_data->read(drv_data);
 
 			msg->actual_length += drv_data->len;
 			msg->state = pxa2xx_spi_next_transfer(drv_data);
@@ -371,6 +355,10 @@ void pxa2xx_spi_dma_release(struct driver_data *drv_data)
 
 void pxa2xx_spi_dma_resume(struct driver_data *drv_data)
 {
+	if (drv_data->rx_chan)
+		dmaengine_resume(drv_data->rx_chan);
+	if (drv_data->tx_chan)
+		dmaengine_resume(drv_data->tx_chan);
 }
 
 int pxa2xx_spi_set_dma_burst_and_threshold(struct chip_data *chip,
@@ -385,7 +373,7 @@ int pxa2xx_spi_set_dma_burst_and_threshold(struct chip_data *chip,
 	 * otherwise we use the default. Also we use the default FIFO
 	 * thresholds for now.
 	 */
-	*burst_code = chip_info ? chip_info->dma_burst_size : 16;
+	*burst_code = chip_info ? chip_info->dma_burst_size : 1;
 	*threshold = SSCR1_RxTresh(RX_THRESH_DFLT)
 		   | SSCR1_TxTresh(TX_THRESH_DFLT);
 

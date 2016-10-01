@@ -17,6 +17,14 @@ config IIO_BUFFER
 	  Provide core support for various buffer based data
 	  acquisition methods.
 
+config IIO_CONFIGFS
+	tristate "Enable IIO configuration via configfs"
+	select CONFIGFS_FS
+	help
+	  This allows configuring various IIO bits through configfs
+	  (e.g. software triggers). For more info see
+	  Documentation/iio/iio_configfs.txt.
+
 if IIO_BUFFER
 
 config IIO_BUFFER_CB
@@ -57,6 +65,14 @@ config IIO_CONSUMERS_PER_TRIGGER
        help
 	This value controls the maximum number of consumers that a
 	given trigger may handle. Default is 2.
+
+config IIO_SW_TRIGGER
+	bool "Enable software triggers support"
+	depends on IIO_TRIGGER
+	help
+	 Provides IIO core support for software triggers. A software
+	 trigger can be created via configfs or directly by a driver
+	 using the API provided.
 
 source "drivers/iio/accel/Kconfig"
 source "drivers/iio/adc/Kconfig"

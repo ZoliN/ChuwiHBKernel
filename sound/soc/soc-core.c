@@ -43,6 +43,7 @@
 #include <sound/pcm_params.h>
 #include <sound/soc.h>
 #include <sound/soc-dpcm.h>
+#include <sound/soc-fw.h>
 #include <sound/initval.h>
 
 #define CREATE_TRACE_POINTS
@@ -867,13 +868,15 @@ static int soc_bind_dai_link(struct snd_soc_card *card, int num)
 		if (dai_link->cpu_of_node &&
 		    (cpu_dai->dev->of_node != dai_link->cpu_of_node))
 			continue;
-		if (dai_link->cpu_name &&
-		    strcmp(dev_name(cpu_dai->dev), dai_link->cpu_name))
-			continue;
-		if (dai_link->cpu_dai_name &&
-		    strcmp(cpu_dai->name, dai_link->cpu_dai_name))
-			continue;
 
+		if (dai_link->cpu_name) {
+		    if (strcmp(dev_name(cpu_dai->dev), dai_link->cpu_name))
+			continue;
+}
+		if (dai_link->cpu_dai_name) {
+		    if (strcmp(cpu_dai->name, dai_link->cpu_dai_name))
+			continue;
+}
 		rtd->cpu_dai = cpu_dai;
 	}
 
@@ -900,11 +903,9 @@ static int soc_bind_dai_link(struct snd_soc_card *card, int num)
 		 * this CODEC
 		 */
 		list_for_each_entry(codec_dai, &dai_list, list) {
-			if (codec->dev == codec_dai->dev &&
-				!strcmp(codec_dai->name,
-					dai_link->codec_dai_name)) {
-
-				rtd->codec_dai = codec_dai;
+			if (codec->dev == codec_dai->dev) {
+				if (!strcmp(codec_dai->name, dai_link->codec_dai_name))
+					rtd->codec_dai = codec_dai;
 			}
 		}
 
@@ -1196,9 +1197,15 @@ static int soc_probe_platform(struct snd_soc_card *card,
 
 	/* Create DAPM widgets for each DAI stream */
 	list_for_each_entry(dai, &dai_list, list) {
-		if (dai->dev != platform->dev)
+		if (dai->dev != platform->dev ||
+		    dai->playback_widget || dai->capture_widget)
 			continue;
 
+		/* dummy platform doesn't have and DAIs, don't add dummy-codec
+		 * widgets here (since dev is the same)
+		 */
+		if (!strcmp(dai->name, "snd-soc-dummy-dai"))
+			continue;
 		snd_soc_dapm_new_dai_widgets(&platform->dapm, dai);
 	}
 
@@ -1465,10 +1472,16 @@ static int soc_probe_link_dais(struct snd_soc_card *card, int num, int order)
 						codec2codec_close_delayed_work);
 
 			/* link the DAI widgets */
-			play_w = codec_dai->playback_widget;
-			capture_w = cpu_dai->capture_widget;
+			if (!dai_link->dsp_loopback) {
+				play_w = codec_dai->playback_widget;
+				capture_w = cpu_dai->capture_widget;
+			} else {
+				play_w = codec_dai->playback_widget;
+				capture_w = cpu_dai->playback_widget;
+			}
+
 			if (play_w && capture_w) {
-				ret = snd_soc_dapm_new_pcm(card, dai_link->params,
+				ret = snd_soc_dapm_new_pcm(card, dai_link,
 						   capture_w, play_w);
 				if (ret != 0) {
 					dev_err(card->dev, "ASoC: Can't link %s to %s: %d\n",
@@ -1477,10 +1490,16 @@ static int soc_probe_link_dais(struct snd_soc_card *card, int num, int order)
 				}
 			}
 
-			play_w = cpu_dai->playback_widget;
-			capture_w = codec_dai->capture_widget;
+			if (!dai_link->dsp_loopback) {
+				play_w = cpu_dai->playback_widget;
+				capture_w = codec_dai->capture_widget;
+			} else {
+				play_w = cpu_dai->capture_widget;
+				capture_w = codec_dai->capture_widget;
+			}
+
 			if (play_w && capture_w) {
-				ret = snd_soc_dapm_new_pcm(card, dai_link->params,
+				ret = snd_soc_dapm_new_pcm(card, dai_link,
 						   capture_w, play_w);
 				if (ret != 0) {
 					dev_err(card->dev, "ASoC: Can't link %s to %s: %d\n",
@@ -1905,6 +1924,9 @@ static int soc_cleanup_card_resources(struct snd_soc_card *card)
 
 	/* remove and free each DAI */
 	soc_remove_dai_links(card);
+
+	/* remove any dynamic kcontrols */
+	snd_soc_fw_dcontrols_remove_all(card, SND_SOC_FW_INDEX_ALL);
 
 	soc_cleanup_card_debugfs(card);
 
@@ -2571,13 +2593,14 @@ int snd_soc_info_enum_double(struct snd_kcontrol *kcontrol,
 
 	uinfo->type = SNDRV_CTL_ELEM_TYPE_ENUMERATED;
 	uinfo->count = e->shift_l == e->shift_r ? 1 : 2;
-	uinfo->value.enumerated.items = e->max;
+	uinfo->value.enumerated.items = e->items;
 
-	if (uinfo->value.enumerated.item > e->max - 1)
-		uinfo->value.enumerated.item = e->max - 1;
+	if (uinfo->value.enumerated.item >= e->items)
+		uinfo->value.enumerated.item = e->items - 1;
 	strlcpy(uinfo->value.enumerated.name,
-		e->texts[uinfo->value.enumerated.item],
+		snd_soc_get_enum_text(e, uinfo->value.enumerated.item),
 		sizeof(uinfo->value.enumerated.name));
+
 	return 0;
 }
 EXPORT_SYMBOL_GPL(snd_soc_info_enum_double);
@@ -2626,12 +2649,12 @@ int snd_soc_put_enum_double(struct snd_kcontrol *kcontrol,
 	unsigned int val;
 	unsigned int mask;
 
-	if (ucontrol->value.enumerated.item[0] > e->max - 1)
+	if (ucontrol->value.enumerated.item[0] >= e->items)
 		return -EINVAL;
 	val = ucontrol->value.enumerated.item[0] << e->shift_l;
 	mask = e->mask << e->shift_l;
 	if (e->shift_l != e->shift_r) {
-		if (ucontrol->value.enumerated.item[1] > e->max - 1)
+		if (ucontrol->value.enumerated.item[1] >= e->items)
 			return -EINVAL;
 		val |= ucontrol->value.enumerated.item[1] << e->shift_r;
 		mask |= e->mask << e->shift_r;
@@ -2662,14 +2685,14 @@ int snd_soc_get_value_enum_double(struct snd_kcontrol *kcontrol,
 
 	reg_val = snd_soc_read(codec, e->reg);
 	val = (reg_val >> e->shift_l) & e->mask;
-	for (mux = 0; mux < e->max; mux++) {
+	for (mux = 0; mux < e->items; mux++) {
 		if (val == e->values[mux])
 			break;
 	}
 	ucontrol->value.enumerated.item[0] = mux;
 	if (e->shift_l != e->shift_r) {
 		val = (reg_val >> e->shift_r) & e->mask;
-		for (mux = 0; mux < e->max; mux++) {
+		for (mux = 0; mux < e->items; mux++) {
 			if (val == e->values[mux])
 				break;
 		}
@@ -2700,12 +2723,12 @@ int snd_soc_put_value_enum_double(struct snd_kcontrol *kcontrol,
 	unsigned int val;
 	unsigned int mask;
 
-	if (ucontrol->value.enumerated.item[0] > e->max - 1)
+	if (ucontrol->value.enumerated.item[0] >= e->items)
 		return -EINVAL;
 	val = e->values[ucontrol->value.enumerated.item[0]] << e->shift_l;
 	mask = e->mask << e->shift_l;
 	if (e->shift_l != e->shift_r) {
-		if (ucontrol->value.enumerated.item[1] > e->max - 1)
+		if (ucontrol->value.enumerated.item[1] >= e->items)
 			return -EINVAL;
 		val |= e->values[ucontrol->value.enumerated.item[1]] << e->shift_r;
 		mask |= e->mask << e->shift_r;
@@ -2714,6 +2737,48 @@ int snd_soc_put_value_enum_double(struct snd_kcontrol *kcontrol,
 	return snd_soc_update_bits_locked(codec, e->reg, mask, val);
 }
 EXPORT_SYMBOL_GPL(snd_soc_put_value_enum_double);
+
+/**
+ * snd_soc_read_signed - Read a codec register and interprete as signed value
+ * @codec: codec
+ * @reg: Register to read
+ * @mask: Mask to use after shifting the register value
+ * @shift: Right shift of register value
+ * @sign_bit: Bit that describes if a number is negative or not.
+ *
+ * This functions reads a codec register. The register value is shifted right
+ * by 'shift' bits and masked with the given 'mask'. Afterwards it translates
+ * the given registervalue into a signed integer if sign_bit is non-zero.
+ *
+ * Returns the register value as signed int.
+ */
+static int snd_soc_read_signed(struct snd_soc_codec *codec, unsigned int reg,
+		unsigned int mask, unsigned int shift, unsigned int sign_bit)
+{
+	int ret;
+	unsigned int val;
+
+	val = (snd_soc_read(codec, reg) >> shift) & mask;
+
+	if (!sign_bit)
+		return val;
+
+	/* non-negative number */
+	if (!(val & BIT(sign_bit)))
+		return val;
+
+	ret = val;
+
+	/*
+	 * The register most probably does not contain a full-sized int.
+	 * Instead we have an arbitrary number of bits in a signed
+	 * representation which has to be translated into a full-sized int.
+	 * This is done by filling up all bits above the sign-bit.
+	 */
+	ret |= ~((int)(BIT(sign_bit) - 1));
+
+	return ret;
+}
 
 /**
  * snd_soc_info_volsw - single mixer info callback
@@ -2742,8 +2807,8 @@ int snd_soc_info_volsw(struct snd_kcontrol *kcontrol,
 		uinfo->type = SNDRV_CTL_ELEM_TYPE_INTEGER;
 
 	uinfo->count = snd_soc_volsw_is_stereo(mc) ? 2 : 1;
-	uinfo->value.integer.min = 0;
-	uinfo->value.integer.max = platform_max;
+	uinfo->value.integer.min = mc->min;
+	uinfo->value.integer.max = platform_max - mc->min;
 	return 0;
 }
 EXPORT_SYMBOL_GPL(snd_soc_info_volsw);
@@ -2769,11 +2834,16 @@ int snd_soc_get_volsw(struct snd_kcontrol *kcontrol,
 	unsigned int shift = mc->shift;
 	unsigned int rshift = mc->rshift;
 	int max = mc->max;
+	int min = mc->min;
+	int sign_bit = mc->sign_bit;
 	unsigned int mask = (1 << fls(max)) - 1;
 	unsigned int invert = mc->invert;
 
-	ucontrol->value.integer.value[0] =
-		(snd_soc_read(codec, reg) >> shift) & mask;
+	if (sign_bit)
+		mask = BIT(sign_bit + 1) - 1;
+
+	ucontrol->value.integer.value[0] = snd_soc_read_signed(codec, reg, mask,
+			shift, sign_bit) - min;
 	if (invert)
 		ucontrol->value.integer.value[0] =
 			max - ucontrol->value.integer.value[0];
@@ -2781,10 +2851,12 @@ int snd_soc_get_volsw(struct snd_kcontrol *kcontrol,
 	if (snd_soc_volsw_is_stereo(mc)) {
 		if (reg == reg2)
 			ucontrol->value.integer.value[1] =
-				(snd_soc_read(codec, reg) >> rshift) & mask;
+				snd_soc_read_signed(codec, reg, mask, rshift,
+						sign_bit) - min;
 		else
 			ucontrol->value.integer.value[1] =
-				(snd_soc_read(codec, reg2) >> shift) & mask;
+				snd_soc_read_signed(codec, reg2, mask, shift,
+						sign_bit) - min;
 		if (invert)
 			ucontrol->value.integer.value[1] =
 				max - ucontrol->value.integer.value[1];
@@ -2815,6 +2887,8 @@ int snd_soc_put_volsw(struct snd_kcontrol *kcontrol,
 	unsigned int shift = mc->shift;
 	unsigned int rshift = mc->rshift;
 	int max = mc->max;
+	int min = mc->min;
+	unsigned int sign_bit = mc->sign_bit;
 	unsigned int mask = (1 << fls(max)) - 1;
 	unsigned int invert = mc->invert;
 	int err;
@@ -2822,13 +2896,16 @@ int snd_soc_put_volsw(struct snd_kcontrol *kcontrol,
 	unsigned int val2 = 0;
 	unsigned int val, val_mask;
 
-	val = (ucontrol->value.integer.value[0] & mask);
+	if (sign_bit)
+		mask = BIT(sign_bit + 1) - 1;
+
+	val = ((ucontrol->value.integer.value[0] + min) & mask);
 	if (invert)
 		val = max - val;
 	val_mask = mask << shift;
 	val = val << shift;
 	if (snd_soc_volsw_is_stereo(mc)) {
-		val2 = (ucontrol->value.integer.value[1] & mask);
+		val2 = ((ucontrol->value.integer.value[1] + min) & mask);
 		if (invert)
 			val2 = max - val2;
 		if (reg == reg2) {
@@ -3287,6 +3364,19 @@ out:
 }
 EXPORT_SYMBOL_GPL(snd_soc_bytes_put);
 
+int snd_soc_info_bytes_ext(struct snd_kcontrol *kcontrol,
+			struct snd_ctl_elem_info *ucontrol)
+{
+	struct snd_soc_codec *codec = snd_kcontrol_chip(kcontrol);
+	struct soc_bytes_ext *params = (void *)kcontrol->private_value;
+
+	ucontrol->type = SNDRV_CTL_ELEM_TYPE_BYTES;
+	ucontrol->count = params->max;
+
+	return 0;
+}
+EXPORT_SYMBOL_GPL(snd_soc_info_bytes_ext);
+
 /**
  * snd_soc_info_xr_sx - signed multi register info callback
  * @kcontrol: mreg control
@@ -3311,6 +3401,27 @@ int snd_soc_info_xr_sx(struct snd_kcontrol *kcontrol,
 	return 0;
 }
 EXPORT_SYMBOL_GPL(snd_soc_info_xr_sx);
+
+int snd_soc_bytes_tlv_callback(struct snd_kcontrol *kcontrol, int op_flag,
+				unsigned int size, unsigned int __user *tlv)
+{
+	struct soc_bytes_ext *params = (void *)kcontrol->private_value;
+	unsigned int count = size < params->max ? size : params->max;
+	int ret = -ENXIO;
+
+	switch (op_flag) {
+	case SNDRV_CTL_TLV_OP_READ:
+		if (params->get)
+			ret = params->get(kcontrol, tlv, count);
+		break;
+	case SNDRV_CTL_TLV_OP_WRITE:
+		if (params->put)
+			ret = params->put(kcontrol, tlv, count);
+		break;
+	}
+	return ret;
+}
+EXPORT_SYMBOL_GPL(snd_soc_bytes_tlv_callback);
 
 /**
  * snd_soc_get_xr_sx - signed multi register get callback
@@ -3609,6 +3720,30 @@ int snd_soc_dai_set_fmt(struct snd_soc_dai *dai, unsigned int fmt)
 EXPORT_SYMBOL_GPL(snd_soc_dai_set_fmt);
 
 /**
+ * snd_soc_of_xlate_tdm_slot - generate tx/rx slot mask.
+ * @slots: Number of slots in use.
+ * @tx_mask: bitmask representing active TX slots.
+ * @rx_mask: bitmask representing active RX slots.
+ *
+ * Generates the TDM tx and rx slot default masks for DAI.
+ */
+static int snd_soc_of_xlate_tdm_slot_mask(unsigned int slots,
+					  unsigned int *tx_mask,
+					  unsigned int *rx_mask)
+{
+	if (*tx_mask || *rx_mask)
+		return 0;
+
+	if (!slots)
+		return -EINVAL;
+
+	*tx_mask = (1 << slots) - 1;
+	*rx_mask = (1 << slots) - 1;
+
+	return 0;
+}
+
+/**
  * snd_soc_dai_set_tdm_slot - configure DAI TDM.
  * @dai: DAI
  * @tx_mask: bitmask representing active TX slots.
@@ -3622,11 +3757,17 @@ EXPORT_SYMBOL_GPL(snd_soc_dai_set_fmt);
 int snd_soc_dai_set_tdm_slot(struct snd_soc_dai *dai,
 	unsigned int tx_mask, unsigned int rx_mask, int slots, int slot_width)
 {
+	if (dai->driver && dai->driver->ops->of_xlate_tdm_slot_mask)
+		dai->driver->ops->of_xlate_tdm_slot_mask(slots,
+						&tx_mask, &rx_mask);
+	else
+		snd_soc_of_xlate_tdm_slot_mask(slots, &tx_mask, &rx_mask);
+
 	if (dai->driver && dai->driver->ops->set_tdm_slot)
 		return dai->driver->ops->set_tdm_slot(dai, tx_mask, rx_mask,
 				slots, slot_width);
 	else
-		return -EINVAL;
+		return -ENOTSUPP;
 }
 EXPORT_SYMBOL_GPL(snd_soc_dai_set_tdm_slot);
 
@@ -3776,6 +3917,7 @@ int snd_soc_register_card(struct snd_soc_card *card)
 	if (card->rtd == NULL)
 		return -ENOMEM;
 	card->num_rtd = 0;
+
 	card->rtd_aux = &card->rtd[card->num_links];
 
 	for (i = 0; i < card->num_links; i++)
@@ -3783,6 +3925,9 @@ int snd_soc_register_card(struct snd_soc_card *card)
 
 	INIT_LIST_HEAD(&card->list);
 	INIT_LIST_HEAD(&card->dapm_dirty);
+	INIT_LIST_HEAD(&card->denums);
+	INIT_LIST_HEAD(&card->dmixers);
+	INIT_LIST_HEAD(&card->dbytes);
 	card->instantiated = 0;
 	mutex_init(&card->mutex);
 	mutex_init(&card->dapm_mutex);
@@ -4172,6 +4317,9 @@ int snd_soc_add_platform(struct device *dev, struct snd_soc_platform *platform,
 	platform->dapm.platform = platform;
 	platform->dapm.stream_event = platform_drv->stream_event;
 	mutex_init(&platform->mutex);
+	INIT_LIST_HEAD(&platform->denums);
+	INIT_LIST_HEAD(&platform->dmixers);
+	INIT_LIST_HEAD(&platform->dbytes);
 
 	mutex_lock(&client_mutex);
 	list_add(&platform->list, &platform_list);
@@ -4329,6 +4477,9 @@ int snd_soc_register_codec(struct device *dev,
 	codec->driver = codec_drv;
 	codec->num_dai = num_dai;
 	mutex_init(&codec->mutex);
+	INIT_LIST_HEAD(&codec->denums);
+	INIT_LIST_HEAD(&codec->dmixers);
+	INIT_LIST_HEAD(&codec->dbytes);
 
 	for (i = 0; i < num_dai; i++) {
 		fixup_codec_formats(&dai_drv[i].playback);
@@ -4416,6 +4567,122 @@ int snd_soc_of_parse_card_name(struct snd_soc_card *card,
 	return 0;
 }
 EXPORT_SYMBOL_GPL(snd_soc_of_parse_card_name);
+
+static const struct snd_soc_dapm_widget simple_widgets[] = {
+	SND_SOC_DAPM_MIC("Microphone", NULL),
+	SND_SOC_DAPM_LINE("Line", NULL),
+	SND_SOC_DAPM_HP("Headphone", NULL),
+	SND_SOC_DAPM_SPK("Speaker", NULL),
+};
+
+int snd_soc_of_parse_audio_simple_widgets(struct snd_soc_card *card,
+					  const char *propname)
+{
+	struct device_node *np = card->dev->of_node;
+	struct snd_soc_dapm_widget *widgets;
+	const char *template, *wname;
+	int i, j, num_widgets, ret;
+
+	num_widgets = of_property_count_strings(np, propname);
+	if (num_widgets < 0) {
+		dev_err(card->dev,
+			"ASoC: Property '%s' does not exist\n",	propname);
+		return -EINVAL;
+	}
+	if (num_widgets & 1) {
+		dev_err(card->dev,
+			"ASoC: Property '%s' length is not even\n", propname);
+		return -EINVAL;
+	}
+
+	num_widgets /= 2;
+	if (!num_widgets) {
+		dev_err(card->dev, "ASoC: Property '%s's length is zero\n",
+			propname);
+		return -EINVAL;
+	}
+
+	widgets = devm_kcalloc(card->dev, num_widgets, sizeof(*widgets),
+			       GFP_KERNEL);
+	if (!widgets) {
+		dev_err(card->dev,
+			"ASoC: Could not allocate memory for widgets\n");
+		return -ENOMEM;
+	}
+
+	for (i = 0; i < num_widgets; i++) {
+		ret = of_property_read_string_index(np, propname,
+			2 * i, &template);
+		if (ret) {
+			dev_err(card->dev,
+				"ASoC: Property '%s' index %d read error:%d\n",
+				propname, 2 * i, ret);
+			return -EINVAL;
+		}
+
+		for (j = 0; j < ARRAY_SIZE(simple_widgets); j++) {
+			if (!strncmp(template, simple_widgets[j].name,
+				     strlen(simple_widgets[j].name))) {
+				widgets[i] = simple_widgets[j];
+				break;
+			}
+		}
+
+		if (j >= ARRAY_SIZE(simple_widgets)) {
+			dev_err(card->dev,
+				"ASoC: DAPM widget '%s' is not supported\n",
+				template);
+			return -EINVAL;
+		}
+
+		ret = of_property_read_string_index(np, propname,
+						    (2 * i) + 1,
+						    &wname);
+		if (ret) {
+			dev_err(card->dev,
+				"ASoC: Property '%s' index %d read error:%d\n",
+				propname, (2 * i) + 1, ret);
+			return -EINVAL;
+		}
+
+		widgets[i].name = wname;
+	}
+
+	card->dapm_widgets = widgets;
+	card->num_dapm_widgets = num_widgets;
+
+	return 0;
+}
+EXPORT_SYMBOL_GPL(snd_soc_of_parse_audio_simple_widgets);
+
+int snd_soc_of_parse_tdm_slot(struct device_node *np,
+			      unsigned int *slots,
+			      unsigned int *slot_width)
+{
+	u32 val;
+	int ret;
+
+	if (of_property_read_bool(np, "dai-tdm-slot-num")) {
+		ret = of_property_read_u32(np, "dai-tdm-slot-num", &val);
+		if (ret)
+			return ret;
+
+		if (slots)
+			*slots = val;
+	}
+
+	if (of_property_read_bool(np, "dai-tdm-slot-width")) {
+		ret = of_property_read_u32(np, "dai-tdm-slot-width", &val);
+		if (ret)
+			return ret;
+
+		if (slot_width)
+			*slot_width = val;
+	}
+
+	return 0;
+}
+EXPORT_SYMBOL_GPL(snd_soc_of_parse_tdm_slot);
 
 int snd_soc_of_parse_audio_routing(struct snd_soc_card *card,
 				   const char *propname)

@@ -191,6 +191,12 @@ int cayman_dma_resume(struct radeon_device *rdev)
 	u32 reg_offset, wb_offset;
 	int i, r;
 
+	/* Reset dma */
+	WREG32(SRBM_SOFT_RESET, SOFT_RESET_DMA | SOFT_RESET_DMA1);
+	RREG32(SRBM_SOFT_RESET);
+	udelay(50);
+	WREG32(SRBM_SOFT_RESET, 0);
+
 	for (i = 0; i < 2; i++) {
 		if (i == 0) {
 			ring = &rdev->ring[R600_RING_TYPE_DMA_INDEX];
@@ -241,8 +247,6 @@ int cayman_dma_resume(struct radeon_device *rdev)
 
 		ring->wptr = 0;
 		WREG32(DMA_RB_WPTR + reg_offset, ring->wptr << 2);
-
-		ring->rptr = RREG32(DMA_RB_RPTR + reg_offset) >> 2;
 
 		WREG32(DMA_RB_CNTL + reg_offset, rb_cntl | DMA_RB_ENABLE);
 
@@ -296,11 +300,9 @@ bool cayman_dma_is_lockup(struct radeon_device *rdev, struct radeon_ring *ring)
 		mask = RADEON_RESET_DMA1;
 
 	if (!(reset_mask & mask)) {
-		radeon_ring_lockup_update(ring);
+		radeon_ring_lockup_update(rdev, ring);
 		return false;
 	}
-	/* force ring activities */
-	radeon_ring_force_activity(rdev, ring);
 	return radeon_ring_test_lockup(rdev, ring);
 }
 

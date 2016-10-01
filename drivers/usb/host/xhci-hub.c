@@ -25,6 +25,7 @@
 
 #include "xhci.h"
 #include "xhci-trace.h"
+#include "xhci-intel-cap.h"
 
 #define	PORT_WAKE_BITS	(PORT_WKOC_E | PORT_WKDISC_E | PORT_WKCONN_E)
 #define	PORT_RWC_BITS	(PORT_CSC | PORT_PEC | PORT_WRC | PORT_OCC | \
@@ -741,13 +742,14 @@ int xhci_hub_control(struct usb_hcd *hcd, u16 typeReq, u16 wValue,
 	int max_ports;
 	unsigned long flags;
 	u32 temp, status;
-	int retval = 0;
+	int i, retval = 0;
 	__le32 __iomem **port_array;
 	int slot_id;
 	struct xhci_bus_state *bus_state;
 	u16 link_state = 0;
 	u16 wake_mask = 0;
 	u16 timeout = 0;
+	u16 selector = 0;
 
 	max_ports = xhci_get_ports(hcd, &port_array);
 	bus_state = &xhci->bus_state[hcd_index(hcd)];
@@ -783,9 +785,11 @@ int xhci_hub_control(struct usb_hcd *hcd, u16 typeReq, u16 wValue,
 		/* Set the U1 and U2 exit latencies. */
 		memcpy(buf, &usb_bos_descriptor,
 				USB_DT_BOS_SIZE + USB_DT_USB_SS_CAP_SIZE);
-		temp = readl(&xhci->cap_regs->hcs_params3);
-		buf[12] = HCS_U1_LATENCY(temp);
-		put_unaligned_le16(HCS_U2_LATENCY(temp), &buf[13]);
+		if ((xhci->quirks & XHCI_LPM_SUPPORT)) {
+			temp = readl(&xhci->cap_regs->hcs_params3);
+			buf[12] = HCS_U1_LATENCY(temp);
+			put_unaligned_le16(HCS_U2_LATENCY(temp), &buf[13]);
+		}
 
 		/* Indicate whether the host has LTM support. */
 		temp = readl(&xhci->cap_regs->hcc_params);
@@ -819,6 +823,8 @@ int xhci_hub_control(struct usb_hcd *hcd, u16 typeReq, u16 wValue,
 			link_state = (wIndex & 0xff00) >> 3;
 		if (wValue == USB_PORT_FEAT_REMOTE_WAKE_MASK)
 			wake_mask = wIndex & 0xff00;
+		if (wValue == USB_PORT_FEAT_TEST)
+			selector = (wIndex & 0xff00) >> 8;
 		/* The MSB of wIndex is the U1/U2 timeout */
 		timeout = (wIndex & 0xff00) >> 8;
 		wIndex &= 0xff;
@@ -983,7 +989,11 @@ int xhci_hub_control(struct usb_hcd *hcd, u16 typeReq, u16 wValue,
 				goto error;
 			temp = readl(port_array[wIndex] + PORTPMSC);
 			temp &= ~PORT_U1_TIMEOUT_MASK;
-			temp |= PORT_U1_TIMEOUT(timeout);
+			/* Disable U1 for Intel Modem */
+			if (xhci_intel_ssic_port_check(xhci, wIndex + 1))
+				temp |= PORT_U1_TIMEOUT(PORT_U1_DISABLE);
+			else
+				temp |= PORT_U1_TIMEOUT(timeout);
 			writel(temp, port_array[wIndex] + PORTPMSC);
 			break;
 		case USB_PORT_FEAT_U2_TIMEOUT:
@@ -991,8 +1001,66 @@ int xhci_hub_control(struct usb_hcd *hcd, u16 typeReq, u16 wValue,
 				goto error;
 			temp = readl(port_array[wIndex] + PORTPMSC);
 			temp &= ~PORT_U2_TIMEOUT_MASK;
-			temp |= PORT_U2_TIMEOUT(timeout);
+			/* Disable U2 for Intel Modem */
+			if (xhci_intel_ssic_port_check(xhci, wIndex + 1))
+				temp |= PORT_U2_TIMEOUT(PORT_U2_DISABLE);
+			else
+				temp |= PORT_U2_TIMEOUT(timeout);
 			writel(temp, port_array[wIndex] + PORTPMSC);
+			break;
+		case USB_PORT_FEAT_TEST:
+			/* 4.19.6 Port Test Modes (USB2 Test Mode) */
+			if (hcd->speed != HCD_USB2)
+				goto error;
+
+			/* FIXME: Test_Force_Enable case to be implemented */
+			if (!selector || selector > 4)
+				goto error;
+
+			/* Disable all Device Slots */
+			for (i = 0; i < MAX_HC_SLOTS; i++) {
+				if (!xhci->dcbaa->dev_context_ptrs[i])
+					continue;
+
+				if (xhci_queue_slot_control(xhci,
+						TRB_DISABLE_SLOT, i)) {
+					xhci_err(xhci,
+						"Disable slot[%d] fail!\n", i);
+						goto error;
+					}
+				xhci_dbg(xhci, "Disable Slot[%d].\n", i);
+			}
+
+			/* Put all ports to the Disable state by clear PP */
+			xhci_dbg(xhci, "Disable all port (PP = 0)\n");
+			for (i = 0; i < max_ports; i++) {
+				temp = readl(port_array[i]);
+				temp &= ~PORT_POWER;
+				writel(temp, port_array[i]);
+			}
+
+			/* Stop the controller */
+			xhci_dbg(xhci, "Stop controller\n");
+			temp = readl(&xhci->op_regs->command);
+			temp &= ~CMD_RUN;
+			writel(temp, &xhci->op_regs->command);
+
+			if (xhci_handshake(xhci, &xhci->op_regs->status,
+				STS_HALT, STS_HALT, XHCI_MAX_HALT_USEC)) {
+				xhci_warn(xhci, "Stop controller timeout\n");
+				spin_unlock_irqrestore(&xhci->lock, flags);
+				return -ETIMEDOUT;
+			}
+
+			/* Disable runtime PM for test mode */
+			pm_runtime_forbid(hcd->self.controller);
+
+			/* Set PORTPMSC.PTC field for selected test mode */
+			xhci_dbg(xhci, "Enter Test Mode: %d\n", selector);
+			temp = readl(port_array[wIndex] + PORTPMSC);
+			temp |= selector << 28;
+			writel(temp, port_array[wIndex] + PORTPMSC);
+
 			break;
 		default:
 			goto error;
@@ -1165,6 +1233,13 @@ int xhci_bus_suspend(struct usb_hcd *hcd)
 			xhci_dbg(xhci, "suspend failed because a port is resuming\n");
 			return -EBUSY;
 		}
+		if (usb_hub_port_waking_up(hcd->self.root_hub)) {
+			spin_unlock_irqrestore(&xhci->lock, flags);
+			xhci_dbg(xhci,
+				"suspend failed as a SS port is resuming\n");
+			return -EBUSY;
+		}
+
 	}
 
 	port_index = max_ports;

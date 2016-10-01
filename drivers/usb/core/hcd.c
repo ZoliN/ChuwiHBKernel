@@ -1024,9 +1024,12 @@ static int register_root_hub(struct usb_hcd *hcd)
 				dev_name(&usb_dev->dev), retval);
 		return (retval < 0) ? retval : -EMSGSIZE;
 	}
-	if (usb_dev->speed == USB_SPEED_SUPER) {
+
+	if (le16_to_cpu(usb_dev->descriptor.bcdUSB) >= 0x0201) {
 		retval = usb_get_bos_descriptor(usb_dev);
-		if (retval < 0) {
+		if (!retval) {
+			usb_dev->lpm_capable = usb_device_supports_lpm(usb_dev);
+		} else if (usb_dev->speed == USB_SPEED_SUPER) {
 			mutex_unlock(&usb_bus_list_lock);
 			dev_dbg(parent_dev, "can't read %s bos descriptor %d\n",
 					dev_name(&usb_dev->dev), retval);
@@ -2248,9 +2251,7 @@ static void hcd_resume_work(struct work_struct *work)
 	struct usb_hcd *hcd = container_of(work, struct usb_hcd, wakeup_work);
 	struct usb_device *udev = hcd->self.root_hub;
 
-	usb_lock_device(udev);
 	usb_remote_wakeup(udev);
-	usb_unlock_device(udev);
 }
 
 /**

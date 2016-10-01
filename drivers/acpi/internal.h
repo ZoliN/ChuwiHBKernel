@@ -30,6 +30,7 @@ void acpi_pci_root_init(void);
 void acpi_pci_link_init(void);
 void acpi_processor_init(void);
 void acpi_platform_init(void);
+void acpi_intel_thermal_init(void);
 int acpi_sysfs_init(void);
 #ifdef CONFIG_ACPI_CONTAINER
 void acpi_container_init(void);
@@ -70,6 +71,12 @@ static inline void acpi_debugfs_init(void) { return; }
 void acpi_lpss_init(void);
 #else
 static inline void acpi_lpss_init(void) {}
+#endif
+
+#ifdef CONFIG_INTEL_MID_LPSS
+void acpi_mid_lpss_init(void);
+#else
+static inline void acpi_mid_lpss_init(void) {}
 #endif
 
 bool acpi_queue_hotplug_work(struct work_struct *work);

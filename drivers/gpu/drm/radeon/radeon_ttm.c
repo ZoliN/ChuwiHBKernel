@@ -191,7 +191,7 @@ static void radeon_evict_flags(struct ttm_buffer_object *bo,
 	rbo = container_of(bo, struct radeon_bo, tbo);
 	switch (bo->mem.mem_type) {
 	case TTM_PL_VRAM:
-		if (rbo->rdev->ring[radeon_copy_ring_index(rbo->rdev)].ready == false)
+		if (rbo->rdev->ring[RADEON_RING_TYPE_GFX_INDEX].ready == false)
 			radeon_ttm_placement_from_domain(rbo, RADEON_GEM_DOMAIN_CPU);
 		else
 			radeon_ttm_placement_from_domain(rbo, RADEON_GEM_DOMAIN_GTT);
@@ -406,8 +406,14 @@ static int radeon_bo_move(struct ttm_buffer_object *bo,
 	if (r) {
 memcpy:
 		r = ttm_bo_move_memcpy(bo, evict, no_wait_gpu, new_mem);
+		if (r) {
+			return r;
+		}
 	}
-	return r;
+
+	/* update statistics */
+	atomic64_add((u64)bo->num_pages << PAGE_SHIFT, &rdev->num_bytes_moved);
+	return 0;
 }
 
 static int radeon_ttm_io_mem_reserve(struct ttm_bo_device *bdev, struct ttm_mem_reg *mem)
@@ -623,7 +629,7 @@ static int radeon_ttm_tt_populate(struct ttm_tt *ttm)
 						       0, PAGE_SIZE,
 						       PCI_DMA_BIDIRECTIONAL);
 		if (pci_dma_mapping_error(rdev->pdev, gtt->ttm.dma_address[i])) {
-			while (i--) {
+			while (--i) {
 				pci_unmap_page(rdev->pdev, gtt->ttm.dma_address[i],
 					       PAGE_SIZE, PCI_DMA_BIDIRECTIONAL);
 				gtt->ttm.dma_address[i] = 0;
@@ -701,7 +707,9 @@ int radeon_ttm_init(struct radeon_device *rdev)
 	/* No others user of address space so set it to 0 */
 	r = ttm_bo_device_init(&rdev->mman.bdev,
 			       rdev->mman.bo_global_ref.ref.object,
-			       &radeon_bo_driver, DRM_FILE_PAGE_OFFSET,
+			       &radeon_bo_driver,
+			       rdev->ddev->anon_inode->i_mapping,
+			       DRM_FILE_PAGE_OFFSET,
 			       rdev->need_dma32);
 	if (r) {
 		DRM_ERROR("failed initializing buffer object driver(%d).\n", r);
@@ -742,7 +750,6 @@ int radeon_ttm_init(struct radeon_device *rdev)
 	}
 	DRM_INFO("radeon: %uM of GTT memory ready.\n",
 		 (unsigned)(rdev->mc.gtt_size / (1024 * 1024)));
-	rdev->mman.bdev.dev_mapping = rdev->ddev->dev_mapping;
 
 	r = radeon_ttm_debugfs_init(rdev);
 	if (r) {

@@ -29,6 +29,8 @@
 #include <drm/drmP.h>
 #include <drm/i915_drm.h>
 #include "i915_drv.h"
+#include "intel_lrc.h"
+#include <linux/shmem_fs.h>
 
 /*
  * The BIOS typically reserves some of the system's memory for the exclusive
@@ -74,50 +76,6 @@ static unsigned long i915_stolen_to_physical(struct drm_device *dev)
 	if (base == 0)
 		return 0;
 
-	/* make sure we don't clobber the GTT if it's within stolen memory */
-	if (INTEL_INFO(dev)->gen <= 4 && !IS_G33(dev) && !IS_G4X(dev)) {
-		struct {
-			u32 start, end;
-		} stolen[2] = {
-			{ .start = base, .end = base + dev_priv->gtt.stolen_size, },
-			{ .start = base, .end = base + dev_priv->gtt.stolen_size, },
-		};
-		u64 gtt_start, gtt_end;
-
-		gtt_start = I915_READ(PGTBL_CTL);
-		if (IS_GEN4(dev))
-			gtt_start = (gtt_start & PGTBL_ADDRESS_LO_MASK) |
-				(gtt_start & PGTBL_ADDRESS_HI_MASK) << 28;
-		else
-			gtt_start &= PGTBL_ADDRESS_LO_MASK;
-		gtt_end = gtt_start + gtt_total_entries(dev_priv->gtt) * 4;
-
-		if (gtt_start >= stolen[0].start && gtt_start < stolen[0].end)
-			stolen[0].end = gtt_start;
-		if (gtt_end > stolen[1].start && gtt_end <= stolen[1].end)
-			stolen[1].start = gtt_end;
-
-		/* pick the larger of the two chunks */
-		if (stolen[0].end - stolen[0].start >
-		    stolen[1].end - stolen[1].start) {
-			base = stolen[0].start;
-			dev_priv->gtt.stolen_size = stolen[0].end - stolen[0].start;
-		} else {
-			base = stolen[1].start;
-			dev_priv->gtt.stolen_size = stolen[1].end - stolen[1].start;
-		}
-
-		if (stolen[0].start != stolen[1].start ||
-		    stolen[0].end != stolen[1].end) {
-			DRM_DEBUG_KMS("GTT within stolen memory at 0x%llx-0x%llx\n",
-				      (unsigned long long) gtt_start,
-				      (unsigned long long) gtt_end - 1);
-			DRM_DEBUG_KMS("Stolen memory adjusted to 0x%x-0x%x\n",
-				      base, base + (u32) dev_priv->gtt.stolen_size - 1);
-		}
-	}
-
-
 	/* Verify that nothing else uses this physical address. Stolen
 	 * memory should be reserved by the BIOS and hidden from the
 	 * kernel. So if the region is already marked as busy, something
@@ -137,11 +95,7 @@ static unsigned long i915_stolen_to_physical(struct drm_device *dev)
 		r = devm_request_mem_region(dev->dev, base + 1,
 					    dev_priv->gtt.stolen_size - 1,
 					    "Graphics Stolen Memory");
-		/*
-		 * GEN3 firmware likes to smash pci bridges into the stolen
-		 * range. Apparently this works.
-		 */
-		if (r == NULL && !IS_GEN3(dev)) {
+		if (r == NULL) {
 			DRM_ERROR("conflict detected with stolen region: [0x%08x - 0x%08x]\n",
 				  base, base + (uint32_t)dev_priv->gtt.stolen_size);
 			base = 0;
@@ -253,6 +207,13 @@ void i915_gem_cleanup_stolen(struct drm_device *dev)
 	if (!drm_mm_initialized(&dev_priv->mm.stolen))
 		return;
 
+	if (dev_priv->vlv_pctx) {
+		mutex_lock(&dev->struct_mutex);
+		drm_gem_object_unreference(&dev_priv->vlv_pctx->base);
+		mutex_unlock(&dev->struct_mutex);
+		dev_priv->vlv_pctx = NULL;
+	}
+
 	i915_gem_stolen_cleanup_compression(dev);
 	drm_mm_takedown(&dev_priv->mm.stolen);
 }
@@ -263,7 +224,7 @@ int i915_gem_init_stolen(struct drm_device *dev)
 	int bios_reserved = 0;
 
 #ifdef CONFIG_INTEL_IOMMU
-	if (intel_iommu_gfx_mapped) {
+	if (intel_iommu_gfx_mapped && INTEL_INFO(dev)->gen < 8) {
 		DRM_INFO("DMAR active, disabling use of stolen memory\n");
 		return 0;
 	}
@@ -410,6 +371,347 @@ i915_gem_object_create_stolen(struct drm_device *dev, u32 size)
 	drm_mm_remove_node(stolen);
 	kfree(stolen);
 	return NULL;
+}
+
+static int intel_logical_add_clear_obj_cmd(struct intel_ringbuffer *ringbuf,
+					   struct drm_i915_gem_object *obj,
+					   struct i915_address_space *vm)
+{
+	int ret;
+
+	ret = intel_logical_ring_begin(ringbuf, 8);
+	if (ret)
+		return ret;
+
+	intel_logical_ring_emit(ringbuf, GEN8_COLOR_BLT_CMD |
+			      XY_SRC_COPY_BLT_WRITE_ALPHA |
+			      XY_SRC_COPY_BLT_WRITE_RGB | (7-2));
+	intel_logical_ring_emit(ringbuf, BLT_DEPTH_32 |
+			      (PAT_ROP_GXCOPY << ROP_SHIFT) |
+			       PITCH_SIZE);
+	intel_logical_ring_emit(ringbuf, 0);
+	intel_logical_ring_emit(ringbuf, obj->base.size >> PAGE_SHIFT <<
+					HEIGHT_SHIFT | PAGE_SIZE / 4);
+	intel_logical_ring_emit(ringbuf, i915_gem_obj_offset(obj, vm));
+	intel_logical_ring_emit(ringbuf, 0);
+	intel_logical_ring_emit(ringbuf, 0);
+	intel_logical_ring_emit(ringbuf, MI_NOOP);
+
+	intel_logical_ring_advance(ringbuf);
+	return 0;
+}
+
+static int intel_logical_memset_stolen_obj_hw(struct drm_i915_gem_object *obj)
+{
+	struct drm_i915_private *dev_priv = obj->base.dev->dev_private;
+	struct intel_engine_cs *ring;
+	struct intel_context *ctx;
+	struct intel_ringbuffer *ringbuf;
+	struct i915_address_space *vm;
+	struct drm_i915_gem_request *req;
+	int ret;
+
+	/* Pre-Gen6, blitter engine is not on a separate ring */
+	if (!(INTEL_INFO(obj->base.dev)->gen >= 6))
+		return 1;
+
+	ring = &dev_priv->ring[BCS];
+
+	ctx = ring->default_context;
+	if (ctx->ppgtt)
+		vm = &ctx->ppgtt->base;
+	else
+		vm = &dev_priv->gtt.base;
+
+	ringbuf = ctx->engine[ring->id].ringbuf;
+	if (!ringbuf)
+		DRM_ERROR("No ring obj");
+
+	ret = i915_gem_object_pin(obj, vm, 0, PAGE_SIZE, 0);
+	if (ret) {
+		DRM_ERROR("Mapping of User FB to PPGTT failed\n");
+		return ret;
+	}
+
+	ret = logical_ring_invalidate_all_caches(ringbuf);
+	if (ret) {
+		DRM_ERROR("Invalidate caches failed\n");
+		i915_gem_object_unpin(obj, vm);
+		return ret;
+	}
+
+	/* Adding commands to the blitter ring to
+	 * clear out the contents of the buffer object
+	 */
+	ret = intel_logical_add_clear_obj_cmd(ringbuf, obj, vm);
+	if (ret) {
+		DRM_ERROR("couldn't add commands in blitter ring\n");
+		i915_gem_object_unpin(obj, vm);
+		return ret;
+	}
+
+	req = intel_ring_get_request(ring);
+
+	/* Object now in render domain */
+	obj->base.read_domains = I915_GEM_DOMAIN_RENDER;
+	obj->base.write_domain = I915_GEM_DOMAIN_RENDER;
+
+	i915_vma_move_to_active(i915_gem_obj_to_vma(obj, vm), ring);
+
+	/* Unconditionally force add_request to emit a full flush. */
+	ring->gpu_caches_dirty = true;
+
+	obj->dirty = 1;
+	i915_gem_request_assign(&obj->last_write_req, req);
+
+	/* Add a breadcrumb for the completion of the clear request */
+	ret = __i915_add_request(ring, NULL, ringbuf->obj, true);
+	if (ret)
+		DRM_ERROR("failed to add request\n");
+
+	i915_gem_object_unpin(obj, vm);
+
+	return 0;
+}
+
+static int i915_add_clear_obj_cmd(struct drm_i915_gem_object *obj)
+{
+	struct drm_i915_private *dev_priv = obj->base.dev->dev_private;
+	struct intel_engine_cs *ring = &dev_priv->ring[BCS];
+	u32 offset = i915_gem_obj_ggtt_offset(obj);
+	int ret;
+
+	if (IS_GEN8(dev_priv->dev)) {
+		ret = intel_ring_begin(ring, 8);
+		if (ret)
+			return ret;
+
+		intel_ring_emit(ring, GEN8_COLOR_BLT_CMD |
+				      XY_SRC_COPY_BLT_WRITE_ALPHA |
+				      XY_SRC_COPY_BLT_WRITE_RGB | (7-2));
+		intel_ring_emit(ring, BLT_DEPTH_32 |
+				      (PAT_ROP_GXCOPY << ROP_SHIFT) |
+				       PITCH_SIZE);
+		intel_ring_emit(ring, 0);
+		intel_ring_emit(ring, obj->base.size >> PAGE_SHIFT <<
+						HEIGHT_SHIFT | PAGE_SIZE / 4);
+		intel_ring_emit(ring, i915_gem_obj_ggtt_offset(obj));
+		intel_ring_emit(ring, 0);
+		intel_ring_emit(ring, 0);
+		intel_ring_emit(ring, MI_NOOP);
+
+		intel_ring_advance(ring);
+	} else {
+		ret = intel_ring_begin(ring, 6);
+		if (ret)
+			return ret;
+
+		intel_ring_emit(ring, COLOR_BLT_CMD |
+				      XY_SRC_COPY_BLT_WRITE_ALPHA |
+				      XY_SRC_COPY_BLT_WRITE_RGB);
+		intel_ring_emit(ring, BLT_DEPTH_32 | (PAT_ROP_GXCOPY <<
+					ROP_SHIFT) | PITCH_SIZE);
+		intel_ring_emit(ring,
+				(DIV_ROUND_UP(obj->base.size, PITCH_SIZE) <<
+						HEIGHT_SHIFT) | PITCH_SIZE);
+		intel_ring_emit(ring, offset);
+		intel_ring_emit(ring, 0);
+		intel_ring_emit(ring, MI_NOOP);
+		intel_ring_advance(ring);
+	}
+
+	return 0;
+}
+
+static int i915_memset_stolen_obj_hw(struct drm_i915_gem_object *obj)
+{
+	struct drm_i915_private *dev_priv = obj->base.dev->dev_private;
+	struct intel_engine_cs *ring = &dev_priv->ring[BCS];
+	unsigned alignment = 0;
+	struct drm_i915_gem_request *req;
+	int ret;
+
+	/* Pre-Gen6, blitter engine is not on a separate ring */
+	if (!(INTEL_INFO(obj->base.dev)->gen >= 6))
+		return 1;
+
+	ret = i915_gem_obj_ggtt_pin(obj, alignment, PIN_MAPPABLE);
+	if (ret) {
+		DRM_ERROR("Mapping of User FB to GTT failed\n");
+		return ret;
+	}
+
+	ret = intel_ring_invalidate_all_caches(ring);
+	if (ret) {
+		DRM_ERROR("Invalidate caches failed\n");
+		return ret;
+	}
+
+	/* Adding commands to the blitter ring to
+	 * clear out the contents of the buffer object
+	 */
+	ret = i915_add_clear_obj_cmd(obj);
+	if (ret) {
+		DRM_ERROR("couldn't add commands in blitter ring\n");
+		i915_gem_object_ggtt_unpin(obj);
+		return ret;
+	}
+
+	req = intel_ring_get_request(ring);
+
+	/* Object now in render domain */
+	obj->base.read_domains = I915_GEM_DOMAIN_RENDER;
+	obj->base.write_domain = I915_GEM_DOMAIN_RENDER;
+
+	i915_vma_move_to_active(i915_gem_obj_to_ggtt(obj), ring);
+
+	obj->dirty = 1;
+	i915_gem_request_assign(&obj->last_write_req, req);
+
+	/* Unconditionally force add_request to emit a full flush. */
+	ring->gpu_caches_dirty = true;
+
+	/* Add a breadcrumb for the completion of the clear request */
+	(void)i915_add_request(ring);
+
+	i915_gem_object_ggtt_unpin(obj);
+
+	return 0;
+}
+
+static void i915_memset_stolen_obj_sw(struct drm_i915_gem_object *obj)
+{
+	int ret;
+	char __iomem *base;
+	int size = obj->base.size;
+	struct drm_i915_private *dev_priv = obj->base.dev->dev_private;
+	unsigned alignment = 0;
+
+	ret = i915_gem_obj_ggtt_pin(obj, alignment, PIN_MAPPABLE);
+	if (ret) {
+		DRM_ERROR("Mapping of User FB to GTT failed\n");
+		return;
+	}
+
+	/* Get the CPU virtual address of the frame buffer */
+	base = ioremap_wc(dev_priv->gtt.mappable_base +
+				i915_gem_obj_ggtt_offset(obj), size);
+	if (base == NULL) {
+		DRM_ERROR("Mapping of User FB to CPU failed\n");
+		i915_gem_object_ggtt_unpin(obj);
+		return;
+	}
+
+	memset_io(base, 0, size);
+
+	iounmap(base);
+	i915_gem_object_ggtt_unpin(obj);
+
+	DRM_DEBUG_DRIVER("User FB obj ptr=%p cleared using CPU virt add %p\n",
+			 obj, base);
+}
+
+void
+i915_gem_object_move_to_stolen(struct drm_i915_gem_object *obj)
+{
+	struct drm_device *dev = obj->base.dev;
+	struct drm_i915_private *dev_priv = dev->dev_private;
+	struct drm_mm_node *stolen;
+	u32 size = obj->base.size;
+	int ret = 0;
+
+	if (!IS_VALLEYVIEW(dev))
+		return;
+
+	if (obj->stolen) {
+		BUG_ON(obj->pages == NULL);
+		return;
+	}
+
+	if (!drm_mm_initialized(&dev_priv->mm.stolen))
+		return;
+
+	if (size == 0)
+		return;
+
+	/* Check if already shmem space has been allocated for the object
+	 * or not. We cannot rely on the value of 'pages' field for this.
+	 * As even though if the 'pages' field is NULL, it does not actually
+	 * indicate that the backing physical space (shmem) is currently not
+	 * reserved for the object, as the object may not get purged/truncated
+	 * on the call to 'put_pages_gtt'.
+	 */
+	if (obj->base.filp) {
+		struct inode *inode = file_inode(obj->base.filp);
+		struct shmem_inode_info *info = SHMEM_I(inode);
+		if (!inode)
+			return;
+		spin_lock(&info->lock);
+		/* The allocted field stores how many data pages are
+		 * allocated to the file.
+		 */
+		ret = info->alloced;
+		spin_unlock(&info->lock);
+		if (ret > 0) {
+			DRM_DEBUG_DRIVER(
+				"Already shmem space allocted, %d pges\n", ret);
+			return;
+		}
+	}
+
+	stolen = kzalloc(sizeof(*stolen), GFP_KERNEL);
+	if (!stolen)
+		return;
+
+	ret = drm_mm_insert_node(&dev_priv->mm.stolen, stolen, size,
+				 4096, DRM_MM_SEARCH_DEFAULT);
+	if (ret) {
+		kfree(stolen);
+		DRM_DEBUG_DRIVER("ran out of stolen space\n");
+		return;
+	}
+
+	/* Set up the object to use the stolen memory,
+	 * backing store no longer managed by shmem layer */
+	if (obj->base.filp)
+		fput(obj->base.filp);
+
+	obj->base.filp = NULL;
+	obj->ops = &i915_gem_object_stolen_ops;
+
+	obj->pages = i915_pages_create_for_stolen(dev,
+						stolen->start, stolen->size);
+	if (obj->pages == NULL)
+		goto cleanup;
+
+	i915_gem_object_pin_pages(obj);
+	list_add_tail(&obj->global_list, &dev_priv->mm.unbound_list);
+	obj->has_dma_mapping = true;
+	obj->stolen = stolen;
+
+	DRM_DEBUG_DRIVER("Obj moved to stolen, ptr = %p, size = %x\n",
+			 obj, size);
+
+	obj->base.read_domains = I915_GEM_DOMAIN_CPU | I915_GEM_DOMAIN_GTT;
+	obj->cache_level = HAS_LLC(dev) ? I915_CACHE_LLC : I915_CACHE_NONE;
+
+	/* Zero-out the contents of the stolen object, otherwise we observe
+	 * corruptions in the display. First try using the blitter engine
+	 * to clear the buffer contents
+	 */
+	if (i915.enable_execlists)
+		ret = intel_logical_memset_stolen_obj_hw(obj);
+	else
+		ret = i915_memset_stolen_obj_hw(obj);
+	/* fallback to Sw based memset if Hw memset fails */
+	if (ret)
+		i915_memset_stolen_obj_sw(obj);
+	return;
+
+cleanup:
+	drm_mm_remove_node(stolen);
+	kfree(stolen);
+	return;
 }
 
 struct drm_i915_gem_object *

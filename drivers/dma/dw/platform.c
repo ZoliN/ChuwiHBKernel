@@ -141,6 +141,9 @@ dw_dma_parse_dt(struct platform_device *pdev)
 	if (of_property_read_bool(np, "is_private"))
 		pdata->is_private = true;
 
+	if (of_property_read_bool(np, "no_hclk"))
+		pdata->no_hclk = true;
+
 	if (!of_property_read_u32(np, "chan_allocation_order", &tmp))
 		pdata->chan_allocation_order = (unsigned char)tmp;
 
@@ -233,13 +236,6 @@ static int dw_remove(struct platform_device *pdev)
 	return dw_dma_remove(chip);
 }
 
-static void dw_shutdown(struct platform_device *pdev)
-{
-	struct dw_dma_chip *chip = platform_get_drvdata(pdev);
-
-	dw_dma_shutdown(chip);
-}
-
 #ifdef CONFIG_OF
 static const struct of_device_id dw_dma_of_id_table[] = {
 	{ .compatible = "snps,dma-spear1340" },
@@ -251,6 +247,8 @@ MODULE_DEVICE_TABLE(of, dw_dma_of_id_table);
 #ifdef CONFIG_ACPI
 static const struct acpi_device_id dw_dma_acpi_id_table[] = {
 	{ "INTL9C60", 0 },
+	{ "80862286", 0 },
+	{ "808622C0", 0 },
 	{ }
 };
 MODULE_DEVICE_TABLE(acpi, dw_dma_acpi_id_table);
@@ -282,18 +280,13 @@ static int dw_resume_noirq(struct device *dev)
 #endif /* !CONFIG_PM_SLEEP */
 
 static const struct dev_pm_ops dw_dev_pm_ops = {
-	.suspend_noirq = dw_suspend_noirq,
-	.resume_noirq = dw_resume_noirq,
-	.freeze_noirq = dw_suspend_noirq,
-	.thaw_noirq = dw_resume_noirq,
-	.restore_noirq = dw_resume_noirq,
-	.poweroff_noirq = dw_suspend_noirq,
+	.suspend_late = dw_suspend_noirq,
+	.resume_early = dw_resume_noirq,
 };
 
 static struct platform_driver dw_driver = {
 	.probe		= dw_probe,
 	.remove		= dw_remove,
-	.shutdown	= dw_shutdown,
 	.driver = {
 		.name	= DRV_NAME,
 		.pm	= &dw_dev_pm_ops,

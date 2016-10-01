@@ -34,6 +34,7 @@
 #include <linux/io.h>
 #include <linux/pm_runtime.h>
 #include <linux/pinctrl/pinctrl.h>
+#include <linux/suspend.h>
 
 /* memory mapped register offsets */
 #define BYT_CONF0_REG		0x000
@@ -43,6 +44,7 @@
 #define BYT_INT_STAT_REG	0x800
 
 /* BYT_CONF0_REG register bits */
+#define BYT_DIRECT_IRQ_EN	BIT(27)
 #define BYT_TRIG_NEG		BIT(26)
 #define BYT_TRIG_POS		BIT(25)
 #define BYT_TRIG_LVL		BIT(24)
@@ -182,10 +184,13 @@ static int byt_irq_type(struct irq_data *d, unsigned type)
 	spin_lock_irqsave(&vg->lock, flags);
 	value = readl(reg);
 
+	WARN(value & BYT_DIRECT_IRQ_EN, "Clearing direct_irq_en bit");
+
 	/* For level trigges the BYT_TRIG_POS and BYT_TRIG_NEG bits
 	 * are used to indicate high and low level triggering
 	 */
-	value &= ~(BYT_TRIG_POS | BYT_TRIG_NEG | BYT_TRIG_LVL);
+	value &= ~(BYT_DIRECT_IRQ_EN | BYT_TRIG_POS | BYT_TRIG_NEG |
+		   BYT_TRIG_LVL);
 
 	switch (type) {
 	case IRQ_TYPE_LEVEL_HIGH:
@@ -327,6 +332,9 @@ static void byt_gpio_irq_handler(unsigned irq, struct irq_desc *desc)
 	unsigned virq;
 	int looplimit = 0;
 
+	pm_suspend_dbg(PM_SUSPEND_DBG_MISC,
+		"baytrail pinctrl irq occurs, num %d\n", irq);
+
 	/* check from GPIO controller which pin triggered the interrupt */
 	for (base = 0; base < vg->chip.ngpio; base += 32) {
 
@@ -398,6 +406,7 @@ static struct irq_chip byt_irqchip = {
 	.irq_set_type = byt_irq_type,
 	.irq_startup = byt_irq_startup,
 	.irq_shutdown = byt_irq_shutdown,
+	.flags = IRQCHIP_SKIP_SET_WAKE,
 };
 
 static void byt_gpio_irq_init_hw(struct byt_gpio *vg)
@@ -536,6 +545,7 @@ static const struct dev_pm_ops byt_gpio_pm_ops = {
 
 static const struct acpi_device_id byt_gpio_acpi_match[] = {
 	{ "INT33B2", 0 },
+	{ "INT33FC", 0 },
 	{ }
 };
 MODULE_DEVICE_TABLE(acpi, byt_gpio_acpi_match);

@@ -89,6 +89,7 @@ struct idle_cpu {
 	 * Indicate which enable bits to clear here.
 	 */
 	unsigned long auto_demotion_disable_flags;
+	bool auto_demotion_disable_flag;
 	bool disable_promotion_to_c1e;
 };
 
@@ -191,6 +192,82 @@ static struct cpuidle_state snb_cstates[] = {
 		.flags = MWAIT2flg(0x30) | CPUIDLE_FLAG_TIME_VALID | CPUIDLE_FLAG_TLB_FLUSHED,
 		.exit_latency = 109,
 		.target_residency = 345,
+		.enter = &intel_idle },
+	{
+		.enter = NULL }
+};
+
+static struct cpuidle_state cht_cstates[] = {
+	{ /* MWAIT C1 */
+		.name = "C1-CHT",
+		.desc = "MWAIT 0x00",
+		.flags = MWAIT2flg(0x00) | CPUIDLE_FLAG_TIME_VALID,
+		.exit_latency = 1,
+		.target_residency = 4,
+		.enter = &intel_idle },
+	{ /* MWAIT C6 */
+		.name = "C6-CHT",
+		.desc = "MWAIT 0x52",
+		.flags = MWAIT2flg(0x52) | CPUIDLE_FLAG_TIME_VALID
+						| CPUIDLE_FLAG_TLB_FLUSHED,
+		.exit_latency = 140,
+		.target_residency = 560,
+		.enter = &intel_idle },
+	{ /* MWAIT C7-S0i1 */
+		.name = "S0i1-CHT",
+		.desc = "MWAIT 0x60",
+		.flags = MWAIT2flg(0x60) | CPUIDLE_FLAG_TIME_VALID
+						| CPUIDLE_FLAG_TLB_FLUSHED,
+		.exit_latency = 1200,
+		.target_residency = 4000,
+		.enter = &intel_idle },
+	{ /* MWAIT C9-S0i3 */
+		.name = "S0i3-CHT",
+		.desc = "MWAIT 0x64",
+		.flags = MWAIT2flg(0x64) | CPUIDLE_FLAG_TIME_VALID
+						| CPUIDLE_FLAG_TLB_FLUSHED,
+		.exit_latency = 10000,
+		.target_residency = 20000,
+		.enter = &intel_idle },
+	{
+		.enter = NULL }
+};
+
+static struct cpuidle_state byt_cstates[] = {
+	{
+		.name = "C1-BYT",
+		.desc = "MWAIT 0x00",
+		.flags = MWAIT2flg(0x00) | CPUIDLE_FLAG_TIME_VALID,
+		.exit_latency = 1,
+		.target_residency = 1,
+		.enter = &intel_idle },
+	{
+		.name = "C6N-BYT",
+		.desc = "MWAIT 0x58",
+		.flags = MWAIT2flg(0x58) | CPUIDLE_FLAG_TIME_VALID | CPUIDLE_FLAG_TLB_FLUSHED,
+		.exit_latency = 100,
+		.target_residency = 550,
+		.enter = &intel_idle },
+	{
+		.name = "C6S-BYT",
+		.desc = "MWAIT 0x52",
+		.flags = MWAIT2flg(0x52) | CPUIDLE_FLAG_TIME_VALID | CPUIDLE_FLAG_TLB_FLUSHED,
+		.exit_latency = 200,
+		.target_residency = 1120,
+		.enter = &intel_idle },
+	{
+		.name = "C7-BYT",
+		.desc = "MWAIT 0x60",
+		.flags = MWAIT2flg(0x60) | CPUIDLE_FLAG_TIME_VALID | CPUIDLE_FLAG_TLB_FLUSHED,
+		.exit_latency = 1260,
+		.target_residency = 3000,
+		.enter = &intel_idle },
+	{
+		.name = "C7S-BYT",
+		.desc = "MWAIT 0x64",
+		.flags = MWAIT2flg(0x64) | CPUIDLE_FLAG_TIME_VALID | CPUIDLE_FLAG_TLB_FLUSHED,
+		.exit_latency = 10060,
+		.target_residency = 40000,
 		.enter = &intel_idle },
 	{
 		.enter = NULL }
@@ -464,6 +541,18 @@ static const struct idle_cpu idle_cpu_snb = {
 	.disable_promotion_to_c1e = true,
 };
 
+static const struct idle_cpu idle_cpu_byt = {
+	.state_table = byt_cstates,
+	.disable_promotion_to_c1e = true,
+	.auto_demotion_disable_flag = true,
+};
+
+static const struct idle_cpu idle_cpu_cht = {
+	.state_table = cht_cstates,
+	.disable_promotion_to_c1e = true,
+	.auto_demotion_disable_flag = true,
+};
+
 static const struct idle_cpu idle_cpu_ivb = {
 	.state_table = ivb_cstates,
 	.disable_promotion_to_c1e = true,
@@ -494,6 +583,8 @@ static const struct x86_cpu_id intel_idle_ids[] = {
 	ICPU(0x2f, idle_cpu_nehalem),
 	ICPU(0x2a, idle_cpu_snb),
 	ICPU(0x2d, idle_cpu_snb),
+	ICPU(0x4c, idle_cpu_cht),
+	ICPU(0x37, idle_cpu_byt),
 	ICPU(0x3a, idle_cpu_ivb),
 	ICPU(0x3e, idle_cpu_ivb),
 	ICPU(0x3c, idle_cpu_hsw),
@@ -584,7 +675,7 @@ static int __init intel_idle_cpuidle_driver_init(void)
 	drv->state_count = 1;
 
 	for (cstate = 0; cstate < CPUIDLE_STATE_MAX; ++cstate) {
-		int num_substates, mwait_hint, mwait_cstate, mwait_substate;
+		int num_substates, mwait_hint, mwait_cstate;
 
 		if (cpuidle_state_table[cstate].enter == NULL)
 			break;
@@ -597,14 +688,13 @@ static int __init intel_idle_cpuidle_driver_init(void)
 
 		mwait_hint = flg2MWAIT(cpuidle_state_table[cstate].flags);
 		mwait_cstate = MWAIT_HINT2CSTATE(mwait_hint);
-		mwait_substate = MWAIT_HINT2SUBSTATE(mwait_hint);
 
-		/* does the state exist in CPUID.MWAIT? */
+		/* number of sub-states for this state in CPUID.MWAIT */
 		num_substates = (mwait_substates >> ((mwait_cstate + 1) * 4))
 					& MWAIT_SUBSTATE_MASK;
 
-		/* if sub-state in table is not enumerated by CPUID */
-		if ((mwait_substate + 1) > num_substates)
+		/* if NO sub-states for this state in CPUID, skip it */
+		if (num_substates == 0)
 			continue;
 
 		if (((mwait_cstate + 1) > 2) &&
@@ -620,6 +710,11 @@ static int __init intel_idle_cpuidle_driver_init(void)
 
 	if (icpu->auto_demotion_disable_flags)
 		on_each_cpu(auto_demotion_disable, NULL, 1);
+
+	if (icpu->auto_demotion_disable_flag) {
+		wrmsrl(MSR_CC6_DEMOTION_POLICY_CONFIG, 0);
+		wrmsrl(MSR_MC6_DEMOTION_POLICY_CONFIG, 0);
+	}
 
 	if (icpu->disable_promotion_to_c1e)	/* each-cpu is redundant */
 		on_each_cpu(c1e_promotion_disable, NULL, 1);

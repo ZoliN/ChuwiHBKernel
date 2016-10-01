@@ -36,11 +36,13 @@
 #include <linux/acpi.h>
 #include <linux/pm.h>
 #include <linux/pm_runtime.h>
+#include <linux/pm_qos.h>
 #include <linux/delay.h>
 
 #include <linux/mmc/host.h>
 #include <linux/mmc/pm.h>
 #include <linux/mmc/sdhci.h>
+#include <linux/mmc/slot-gpio.h>
 
 #include "sdhci.h"
 
@@ -66,6 +68,8 @@ struct sdhci_acpi_slot {
 	unsigned int	caps2;
 	mmc_pm_flag_t	pm_caps;
 	unsigned int	flags;
+	int (*probe_slot) (struct platform_device *);
+	int (*remove_slot)(struct platform_device *);
 };
 
 struct sdhci_acpi_host {
@@ -73,6 +77,7 @@ struct sdhci_acpi_host {
 	const struct sdhci_acpi_slot	*slot;
 	struct platform_device		*pdev;
 	bool				use_runtime_pm;
+	unsigned int			autosuspend_delay;
 };
 
 static inline bool sdhci_acpi_flag(struct sdhci_acpi_host *c, unsigned int flag)
@@ -113,23 +118,112 @@ static const struct sdhci_acpi_chip sdhci_acpi_chip_int = {
 	.ops = &sdhci_acpi_ops_int,
 };
 
+/*
+ * This probe slot routine is being added to address an issue on the host
+ * controller's IP where hangs will occur of the platform enters a C state
+ * below C2 while there is an outstanding write transaction. This is observed
+ * on Baytrail based platforms, and should only be enabled on platforms with
+ * host controller IP blocks that exhibit this.  We're calling based on the
+ * ACPI-ID of the IP block.
+ *
+ * Intel SDHCI host controller can support up to 4Mbytes request size in ADMA
+ * mode, which is much larger than the default 512KBytes. Change to 4Mbytes
+ * per the performance requirements
+ */
+static int sdhci_acpi_probe_slot(struct platform_device *pdev)
+{
+	struct sdhci_acpi_host *c = platform_get_drvdata(pdev);
+	struct sdhci_host *host;
+
+	if (!c || !c->host)
+		return 0;
+
+	host = c->host;
+	host->mmc->qos = kzalloc(sizeof(struct pm_qos_request), GFP_KERNEL);
+	pm_qos_add_request(host->mmc->qos, PM_QOS_CPU_DMA_LATENCY,
+					PM_QOS_DEFAULT_VALUE);
+
+	/* change to 4Mbytes */
+	host->mmc->max_req_size = 4 * 1024 * 1024;
+
+	return 0;
+}
+
+static int sdhci_acpi_sdio_probe_slot(struct platform_device *pdev)
+{
+	struct sdhci_acpi_host *c = platform_get_drvdata(pdev);
+	struct sdhci_host *host;
+
+	if (!c || !c->host)
+		return 0;
+
+	/* increase the auto suspend delay for SDIO to be 500ms.
+	 * It can fix some latency issues after enabling rpm.
+	 */
+	c->autosuspend_delay = 500;
+
+	return sdhci_acpi_probe_slot(pdev);
+}
+
+static int sdhci_acpi_sd_probe_slot(struct platform_device *pdev)
+{
+	struct device *dev = &pdev->dev;
+	acpi_handle handle = ACPI_HANDLE(dev);
+	struct acpi_device *device;
+
+	if (!acpi_bus_get_device(handle, &device))
+		device->power.flags.power_resources = 0;
+
+	return sdhci_acpi_probe_slot(pdev);
+}
+
+static int sdhci_acpi_remove_slot(struct platform_device *pdev)
+{
+	struct sdhci_acpi_host *c = platform_get_drvdata(pdev);
+	struct sdhci_host *host;
+
+	if (!c || !c->host)
+		return 0;
+
+	host = c->host;
+
+	if (host->mmc && host->mmc->qos)
+		kfree(host->mmc->qos);
+
+	return 0;
+}
+
 static const struct sdhci_acpi_slot sdhci_acpi_slot_int_emmc = {
 	.chip    = &sdhci_acpi_chip_int,
-	.caps    = MMC_CAP_8_BIT_DATA | MMC_CAP_NONREMOVABLE | MMC_CAP_HW_RESET,
-	.caps2   = MMC_CAP2_HC_ERASE_SZ,
+	.caps    = MMC_CAP_8_BIT_DATA | MMC_CAP_NONREMOVABLE | MMC_CAP_HW_RESET
+		| MMC_CAP_1_8V_DDR,
+	.caps2   = MMC_CAP2_HC_ERASE_SZ | MMC_CAP2_POLL_R1B_BUSY |
+		MMC_CAP2_CACHE_CTRL | MMC_CAP2_HS200_1_8V_SDR |
+		MMC_CAP2_CAN_DO_CMDQ | MMC_CAP2_PACKED_CMD,
 	.flags   = SDHCI_ACPI_RUNTIME_PM,
+	.quirks2 = SDHCI_QUIRK2_TUNING_POLL | SDHCI_QUIRK2_PRESET_VALUE_BROKEN,
+	.pm_caps = MMC_PM_TUNING_AFTER_RTRESUME,
+	.probe_slot = sdhci_acpi_probe_slot,
+	.remove_slot = sdhci_acpi_remove_slot,
 };
 
 static const struct sdhci_acpi_slot sdhci_acpi_slot_int_sdio = {
-	.quirks2 = SDHCI_QUIRK2_HOST_OFF_CARD_ON,
+	.quirks2 = SDHCI_QUIRK2_HOST_OFF_CARD_ON |
+		   SDHCI_QUIRK2_PRESET_VALUE_BROKEN |
+		   SDHCI_QUIRK2_FAKE_VDD,
 	.caps    = MMC_CAP_NONREMOVABLE | MMC_CAP_POWER_OFF_CARD,
 	.flags   = SDHCI_ACPI_RUNTIME_PM,
 	.pm_caps = MMC_PM_KEEP_POWER,
+	.probe_slot = sdhci_acpi_sdio_probe_slot,
+	.remove_slot = sdhci_acpi_remove_slot,
 };
 
 static const struct sdhci_acpi_slot sdhci_acpi_slot_int_sd = {
+	.caps2   = MMC_CAP2_FULL_PWR_CYCLE,
 	.flags   = SDHCI_ACPI_SD_CD | SDHCI_ACPI_RUNTIME_PM,
-	.quirks2 = SDHCI_QUIRK2_CARD_ON_NEEDS_BUS_ON,
+	.quirks2 = SDHCI_QUIRK2_PRESET_VALUE_BROKEN,
+	.probe_slot = sdhci_acpi_sd_probe_slot,
+	.remove_slot = sdhci_acpi_remove_slot,
 };
 
 struct sdhci_acpi_uid_slot {
@@ -142,6 +236,7 @@ static const struct sdhci_acpi_uid_slot sdhci_acpi_uids[] = {
 	{ "80860F14" , "1" , &sdhci_acpi_slot_int_emmc },
 	{ "80860F14" , "3" , &sdhci_acpi_slot_int_sd   },
 	{ "INT33BB"  , "2" , &sdhci_acpi_slot_int_sdio },
+	{ "INT33BB"  , "3" , &sdhci_acpi_slot_int_sd   },
 	{ "INT33C6"  , NULL, &sdhci_acpi_slot_int_sdio },
 	{ "INT3436"  , NULL, &sdhci_acpi_slot_int_sdio },
 	{ "PNP0D40"  },
@@ -194,17 +289,10 @@ static const struct sdhci_acpi_slot *sdhci_acpi_get_slot(acpi_handle handle,
 
 #ifdef CONFIG_PM_RUNTIME
 
-static irqreturn_t sdhci_acpi_sd_cd(int irq, void *dev_id)
-{
-	mmc_detect_change(dev_id, msecs_to_jiffies(200));
-	return IRQ_HANDLED;
-}
-
 static int sdhci_acpi_add_own_cd(struct device *dev, struct mmc_host *mmc)
 {
 	struct gpio_desc *desc;
-	unsigned long flags;
-	int err, irq;
+	int err, gpio;
 
 	desc = devm_gpiod_get_index(dev, "sd_cd", 0);
 	if (IS_ERR(desc)) {
@@ -212,25 +300,15 @@ static int sdhci_acpi_add_own_cd(struct device *dev, struct mmc_host *mmc)
 		goto out;
 	}
 
-	err = gpiod_direction_input(desc);
-	if (err)
-		goto out_free;
+	gpio = desc_to_gpio(desc);
+	devm_gpiod_put(dev, desc);
 
-	irq = gpiod_to_irq(desc);
-	if (irq < 0) {
-		err = irq;
-		goto out_free;
-	}
-
-	flags = IRQF_TRIGGER_RISING | IRQF_TRIGGER_FALLING;
-	err = devm_request_irq(dev, irq, sdhci_acpi_sd_cd, flags, "sd_cd", mmc);
+	err = mmc_gpio_request_cd(mmc, gpio, 0);
 	if (err)
-		goto out_free;
+		goto out;
 
 	return 0;
 
-out_free:
-	devm_gpiod_put(dev, desc);
 out:
 	dev_warn(dev, "failed to setup card detect wake up\n");
 	return err;
@@ -249,7 +327,7 @@ static int sdhci_acpi_probe(struct platform_device *pdev)
 {
 	struct device *dev = &pdev->dev;
 	acpi_handle handle = ACPI_HANDLE(dev);
-	struct acpi_device *device;
+	struct acpi_device *device, *child;
 	struct sdhci_acpi_host *c;
 	struct sdhci_host *host;
 	struct resource *iomem;
@@ -259,6 +337,13 @@ static int sdhci_acpi_probe(struct platform_device *pdev)
 
 	if (acpi_bus_get_device(handle, &device))
 		return -ENODEV;
+
+	if (IS_ENABLED(CONFIG_MMC_SDHCI_ACPI_FORCE_POWER_ON)) {
+		/* Power on the SDHCI controller and its children */
+		acpi_device_fix_up_power(device);
+		list_for_each_entry(child, &device->children, node)
+			acpi_device_fix_up_power(child);
+	}
 
 	if (acpi_bus_get_status(device) || !device->status.present)
 		return -ENODEV;
@@ -285,6 +370,7 @@ static int sdhci_acpi_probe(struct platform_device *pdev)
 	c->slot = sdhci_acpi_get_slot(handle, hid);
 	c->pdev = pdev;
 	c->use_runtime_pm = sdhci_acpi_flag(c, SDHCI_ACPI_RUNTIME_PM);
+	c->autosuspend_delay = 0;
 
 	platform_set_drvdata(pdev, c);
 
@@ -315,6 +401,11 @@ static int sdhci_acpi_probe(struct platform_device *pdev)
 	}
 
 	if (c->slot) {
+		if (c->slot->probe_slot) {
+			err = c->slot->probe_slot(pdev);
+			if (err)
+				goto err_free;
+		}
 		if (c->slot->chip) {
 			host->ops            = c->slot->chip->ops;
 			host->quirks        |= c->slot->chip->quirks;
@@ -332,9 +423,12 @@ static int sdhci_acpi_probe(struct platform_device *pdev)
 
 	host->mmc->caps2 |= MMC_CAP2_NO_PRESCAN_POWERUP;
 
+	/* use async mode for suspend/resume */
+	device_enable_async_suspend(dev);
+
 	err = sdhci_add_host(host);
 	if (err)
-		goto err_free;
+		goto remove_slot;
 
 	if (sdhci_acpi_flag(c, SDHCI_ACPI_SD_CD)) {
 		if (sdhci_acpi_add_own_cd(dev, host->mmc))
@@ -343,14 +437,19 @@ static int sdhci_acpi_probe(struct platform_device *pdev)
 
 	if (c->use_runtime_pm) {
 		pm_runtime_set_active(dev);
-		pm_suspend_ignore_children(dev, 1);
-		pm_runtime_set_autosuspend_delay(dev, 50);
+		if (c->autosuspend_delay)
+			pm_runtime_set_autosuspend_delay(dev, c->autosuspend_delay);
+		else
+			pm_runtime_set_autosuspend_delay(dev, 50);
 		pm_runtime_use_autosuspend(dev);
 		pm_runtime_enable(dev);
 	}
 
 	return 0;
 
+remove_slot:
+	if (c->slot && c->slot->remove_slot)
+		c->slot->remove_slot(pdev);
 err_free:
 	sdhci_free_host(c->host);
 	return err;
@@ -367,6 +466,9 @@ static int sdhci_acpi_remove(struct platform_device *pdev)
 		pm_runtime_disable(dev);
 		pm_runtime_put_noidle(dev);
 	}
+
+	if (c->slot && c->slot->remove_slot)
+		c->slot->remove_slot(pdev);
 
 	dead = (sdhci_readl(c->host, SDHCI_INT_STATUS) == ~0);
 	sdhci_remove_host(c->host, dead);

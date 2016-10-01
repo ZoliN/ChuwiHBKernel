@@ -145,6 +145,7 @@ static const struct drm_ioctl_desc drm_ioctls[] = {
 	DRM_IOCTL_DEF(DRM_IOCTL_MODE_SETCRTC, drm_mode_setcrtc, DRM_MASTER|DRM_CONTROL_ALLOW|DRM_UNLOCKED),
 	DRM_IOCTL_DEF(DRM_IOCTL_MODE_GETPLANE, drm_mode_getplane, DRM_CONTROL_ALLOW|DRM_UNLOCKED),
 	DRM_IOCTL_DEF(DRM_IOCTL_MODE_SETPLANE, drm_mode_setplane, DRM_MASTER|DRM_CONTROL_ALLOW|DRM_UNLOCKED),
+	DRM_IOCTL_DEF(DRM_IOCTL_MODE_SETDISPLAY, drm_mode_setdisplay, DRM_MASTER|DRM_CONTROL_ALLOW|DRM_UNLOCKED),
 	DRM_IOCTL_DEF(DRM_IOCTL_MODE_CURSOR, drm_mode_cursor_ioctl, DRM_MASTER|DRM_CONTROL_ALLOW|DRM_UNLOCKED),
 	DRM_IOCTL_DEF(DRM_IOCTL_MODE_GETGAMMA, drm_mode_gamma_get_ioctl, DRM_UNLOCKED),
 	DRM_IOCTL_DEF(DRM_IOCTL_MODE_SETGAMMA, drm_mode_gamma_set_ioctl, DRM_MASTER|DRM_UNLOCKED),
@@ -286,6 +287,88 @@ static int drm_version(struct drm_device *dev, void *data,
 }
 
 /**
+ * drm_ioctl_permit - Check ioctl permissions against caller
+ *
+ * @flags: ioctl permission flags.
+ * @file_priv: Pointer to struct drm_file identifying the caller.
+ *
+ * Checks whether the caller is allowed to run an ioctl with the
+ * indicated permissions. If so, returns zero. Otherwise returns an
+ * error code suitable for ioctl return.
+ */
+int drm_ioctl_permit(u32 flags, struct drm_file *file_priv)
+{
+	/* ROOT_ONLY is only for CAP_SYS_ADMIN */
+	if (unlikely((flags & DRM_ROOT_ONLY) && !capable(CAP_SYS_ADMIN)))
+		return -EACCES;
+
+	/* AUTH is only for authenticated or render client */
+	if (unlikely((flags & DRM_AUTH) && !drm_is_render_client(file_priv) &&
+		     !file_priv->authenticated))
+		return -EACCES;
+
+/* FIXME: On Android side, SurfaceFlinger process is expected to act like a
+    DRM Master, but currently DRM master check is failing on the ioctls made by
+    SurfaceFlinger process. This is because some other service/process is opening the
+    DRM device file & becoming a master */
+#if 0
+	/* MASTER is only for master or control clients */
+	if (unlikely((flags & DRM_MASTER) && !file_priv->is_master &&
+		     !drm_is_control_client(file_priv)))
+		return -EACCES;
+#endif
+
+	/* Control clients must be explicitly allowed */
+	if (unlikely(!(flags & DRM_CONTROL_ALLOW) &&
+		     drm_is_control_client(file_priv)))
+		return -EACCES;
+
+	/* Render clients must be explicitly allowed */
+	if (unlikely(!(flags & DRM_RENDER_ALLOW) &&
+		     drm_is_render_client(file_priv)))
+		return -EACCES;
+
+	return 0;
+}
+
+/**
+ * Prevent new IOCTLs from starting.
+ */
+void drm_halt(struct drm_device *dev)
+{
+	DRM_DEBUG("Halt request\n");
+
+	/* Hold the mutex to prevent the ioctl_count incrementing
+	* while halt_count == 0 in drm_ioctl */
+	mutex_lock(&dev->halt_mutex);
+	atomic_inc(&dev->halt_count);
+	mutex_unlock(&dev->halt_mutex);
+}
+EXPORT_SYMBOL(drm_halt);
+
+/** Wait up to timeout milliseconds for active IOCTLs to complete.
+ * Note: drm_continue() must be called to allow new
+ *       IOCTLs even if this call timeout.
+ */
+int drm_wait_idle(struct drm_device *dev, unsigned timeout)
+{
+	int rc;
+
+	/* Wait for all active IOCTLs to exit */
+	rc = wait_event_interruptible_timeout(dev->halt_queue,
+		(atomic_read(&dev->ioctl_count) == 0),
+		msecs_to_jiffies(timeout));
+
+	if (rc == 0)
+		return -ETIMEDOUT;
+	else if (rc < 0)
+		return rc;
+
+	return 0;
+}
+EXPORT_SYMBOL(drm_wait_idle);
+
+/**
  * Called whenever a process performs an ioctl on /dev/drm.
  *
  * \param inode device inode.
@@ -309,11 +392,41 @@ long drm_ioctl(struct file *filp,
 	char stack_kdata[128];
 	char *kdata = NULL;
 	unsigned int usize, asize;
+	unsigned int ready = 0;
 
 	dev = file_priv->minor->dev;
 
 	if (drm_device_is_unplugged(dev))
 		return -ENODEV;
+
+	while (!ready) {
+		/* halt_mutex ensures that ioctl_count can only increment
+		* whilst halt_count == 0. Without this we could get
+		* the following scenario:
+		*
+		*	drm_ioctl:	halt_count == 0 ? --> YES
+		*	    drm_halt:	    halt_count++
+		*	    drm_wait_idle:  ioctl_count == 0 ? --> YES
+		*	drm_ioctl:	ioctl_count++
+		*	    drm_wait_idle:  return "idle" to caller
+		*	drm_ioctl:	ioctl continues executing
+		*
+		* In the above scenario drm_wait_idle thinks we are
+		* halted with no active ioctls but drm_ioctl
+		* thinks we are not halted so it allows the current
+		* ioctl to execute! The mutex protects against this
+		* concurrency problem.
+		*/
+		mutex_lock(&dev->halt_mutex);
+		if (atomic_read(&dev->halt_count) == 0) {
+			atomic_inc(&dev->ioctl_count);
+			ready = 1;
+		}
+		mutex_unlock(&dev->halt_mutex);
+
+		if (!ready)
+			return retcode;
+	}
 
 	if ((nr >= DRM_CORE_IOCTL_COUNT) &&
 	    ((nr < DRM_COMMAND_BASE) || (nr >= DRM_COMMAND_END)))
@@ -344,71 +457,93 @@ long drm_ioctl(struct file *filp,
 
 	DRM_DEBUG("pid=%d, dev=0x%lx, auth=%d, %s\n",
 		  task_pid_nr(current),
-		  (long)old_encode_dev(file_priv->minor->device),
+		  (long)old_encode_dev(file_priv->minor->kdev->devt),
 		  file_priv->authenticated, ioctl->name);
 
 	/* Do not trust userspace, use our own definition */
 	func = ioctl->func;
 
-	if (!func) {
+	if (unlikely(!func)) {
 		DRM_DEBUG("no function\n");
 		retcode = -EINVAL;
-	} else if (((ioctl->flags & DRM_ROOT_ONLY) && !capable(CAP_SYS_ADMIN)) ||
-		   ((ioctl->flags & DRM_AUTH) && !drm_is_render_client(file_priv) && !file_priv->authenticated) ||
-		   ((ioctl->flags & DRM_MASTER) && !file_priv->is_master) ||
-		   (!(ioctl->flags & DRM_CONTROL_ALLOW) && (file_priv->minor->type == DRM_MINOR_CONTROL)) ||
-		   (!(ioctl->flags & DRM_RENDER_ALLOW) && drm_is_render_client(file_priv))) {
-		retcode = -EACCES;
-	} else {
-		if (cmd & (IOC_IN | IOC_OUT)) {
-			if (asize <= sizeof(stack_kdata)) {
-				kdata = stack_kdata;
-			} else {
-				kdata = kmalloc(asize, GFP_KERNEL);
-				if (!kdata) {
-					retcode = -ENOMEM;
-					goto err_i1;
-				}
-			}
-			if (asize > usize)
-				memset(kdata + usize, 0, asize - usize);
-		}
+		goto err_i1;
+	}
 
-		if (cmd & IOC_IN) {
-			if (copy_from_user(kdata, (void __user *)arg,
-					   usize) != 0) {
-				retcode = -EFAULT;
+	retcode = drm_ioctl_permit(ioctl->flags, file_priv);
+	if (unlikely(retcode))
+		goto err_i1;
+
+	if (cmd & (IOC_IN | IOC_OUT)) {
+		if (asize <= sizeof(stack_kdata)) {
+			kdata = stack_kdata;
+		} else {
+			kdata = kmalloc(asize, GFP_KERNEL);
+			if (!kdata) {
+				retcode = -ENOMEM;
 				goto err_i1;
 			}
-		} else
-			memset(kdata, 0, usize);
-
-		if (ioctl->flags & DRM_UNLOCKED)
-			retcode = func(dev, kdata, file_priv);
-		else {
-			mutex_lock(&drm_global_mutex);
-			retcode = func(dev, kdata, file_priv);
-			mutex_unlock(&drm_global_mutex);
 		}
+		if (asize > usize)
+			memset(kdata + usize, 0, asize - usize);
+	}
 
-		if (cmd & IOC_OUT) {
-			if (copy_to_user((void __user *)arg, kdata,
-					 usize) != 0)
-				retcode = -EFAULT;
+	if (cmd & IOC_IN) {
+		if (copy_from_user(kdata, (void __user *)arg,
+				   usize) != 0) {
+			retcode = -EFAULT;
+			goto err_i1;
 		}
+	} else if (cmd & IOC_OUT) {
+		memset(kdata, 0, usize);
+	}
+
+	if (ioctl->flags & DRM_UNLOCKED)
+		retcode = func(dev, kdata, file_priv);
+	else {
+		mutex_lock(&drm_global_mutex);
+		retcode = func(dev, kdata, file_priv);
+		mutex_unlock(&drm_global_mutex);
+	}
+
+	if (cmd & IOC_OUT) {
+		if (copy_to_user((void __user *)arg, kdata,
+				 usize) != 0)
+			retcode = -EFAULT;
 	}
 
       err_i1:
 	if (!ioctl)
 		DRM_DEBUG("invalid ioctl: pid=%d, dev=0x%lx, auth=%d, cmd=0x%02x, nr=0x%02x\n",
 			  task_pid_nr(current),
-			  (long)old_encode_dev(file_priv->minor->device),
+			  (long)old_encode_dev(file_priv->minor->kdev->devt),
 			  file_priv->authenticated, cmd, nr);
 
 	if (kdata != stack_kdata)
 		kfree(kdata);
 	if (retcode)
 		DRM_DEBUG("ret = %d\n", retcode);
+
+	if (atomic_dec_return(&dev->ioctl_count) == 0)
+		wake_up_all(&dev->halt_queue);
+
 	return retcode;
 }
 EXPORT_SYMBOL(drm_ioctl);
+
+/**
+ * drm_ioctl_flags - Check for core ioctl and return ioctl permission flags
+ *
+ * @nr: Ioctl number.
+ * @flags: Where to return the ioctl permission flags
+ */
+bool drm_ioctl_flags(unsigned int nr, unsigned int *flags)
+{
+	if ((nr >= DRM_COMMAND_END && nr < DRM_CORE_IOCTL_COUNT) ||
+	    (nr < DRM_COMMAND_BASE)) {
+		*flags = drm_ioctls[nr].flags;
+		return true;
+	}
+
+	return false;
+}
+EXPORT_SYMBOL(drm_ioctl_flags);

@@ -1,0 +1,8 @@
+if EXTERNAL_CAMERA
+source drivers/external_drivers/camera/drivers/Kconfig
+endif
+
+if EXTERNAL_BTNS_CAMERA
+# for BTNS camera drivers
+source drivers/external_drivers/camera/drivers/Kconfig
+endif

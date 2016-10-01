@@ -1,6 +1,7 @@
 /*
  * arizona-spi.c  --  Arizona SPI bus interface
  *
+ * Copyright 2014 Cirrus Logic
  * Copyright 2012 Wolfson Microelectronics plc
  *
  * Author: Mark Brown <broonie@opensource.wolfsonmicro.com>
@@ -28,7 +29,8 @@ static int arizona_spi_probe(struct spi_device *spi)
 	const struct spi_device_id *id = spi_get_device_id(spi);
 	struct arizona *arizona;
 	const struct regmap_config *regmap_config;
-	int ret, type;
+	unsigned long type;
+	int ret;
 
 	if (spi->dev.of_node)
 		type = arizona_of_get_type(&spi->dev);
@@ -41,9 +43,16 @@ static int arizona_spi_probe(struct spi_device *spi)
 		regmap_config = &wm5102_spi_regmap;
 		break;
 #endif
-#ifdef CONFIG_MFD_WM5110
+#ifdef CONFIG_MFD_FLORIDA
+	case WM8280:
 	case WM5110:
-		regmap_config = &wm5110_spi_regmap;
+		regmap_config = &florida_spi_regmap;
+		break;
+#endif
+#ifdef CONFIG_MFD_CS47L24
+	case WM1831:
+	case CS47L24:
+		regmap_config = &cs47l24_spi_regmap;
 		break;
 #endif
 	default:
@@ -80,7 +89,11 @@ static int arizona_spi_remove(struct spi_device *spi)
 
 static const struct spi_device_id arizona_spi_ids[] = {
 	{ "wm5102", WM5102 },
+	{ "wm8280", WM8280 },
+	{ "wm8281", WM8280 },
 	{ "wm5110", WM5110 },
+	{ "wm1831", WM1831 },
+	{ "cs47l24", CS47L24 },
 	{ },
 };
 MODULE_DEVICE_TABLE(spi, arizona_spi_ids);

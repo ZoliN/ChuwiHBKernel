@@ -10,7 +10,7 @@
 
 #define DRIVER_MAJOR		1
 #define DRIVER_MINOR		1
-#define DRIVER_PATCHLEVEL	2
+#define DRIVER_PATCHLEVEL	1
 
 /*
  * 1.1.1:
@@ -21,8 +21,6 @@
  *        to control registers on the MPs to enable performance counters,
  *        and to control the warp error enable mask (OpenGL requires out of
  *        bounds access to local memory to be silently ignored / return 0).
- * 1.1.2:
- *      - fixes multiple bugs in flip completion events and timestamping
  */
 
 #include <core/client.h>
@@ -163,10 +161,7 @@ int nouveau_pmops_resume(struct device *);
 #define NV_ERROR(cli, fmt, args...) nv_error((cli), fmt, ##args)
 #define NV_WARN(cli, fmt, args...) nv_warn((cli), fmt, ##args)
 #define NV_INFO(cli, fmt, args...) nv_info((cli), fmt, ##args)
-#define NV_DEBUG(cli, fmt, args...) do {                                       \
-	if (drm_debug & DRM_UT_DRIVER)                                         \
-		nv_info((cli), fmt, ##args);                                   \
-} while (0)
+#define NV_DEBUG(cli, fmt, args...) nv_debug((cli), fmt, ##args)
 
 extern int nouveau_modeset;
 

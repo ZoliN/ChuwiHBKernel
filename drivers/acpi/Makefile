@@ -18,7 +18,7 @@ obj-y				+= acpi.o \
 					acpica/
 
 # All the builtin files are in the "acpi." module_param namespace.
-acpi-y				+= osl.o utils.o reboot.o
+acpi-y				+= mem.o osl.o utils.o reboot.o
 acpi-y				+= nvs.o
 
 # Power management related files
@@ -41,6 +41,7 @@ acpi-$(CONFIG_ACPI_DOCK)	+= dock.o
 acpi-y				+= pci_root.o pci_link.o pci_irq.o
 acpi-$(CONFIG_X86_INTEL_LPSS)	+= acpi_lpss.o
 acpi-y				+= acpi_platform.o
+acpi-y				+= intel_thermal.o
 acpi-y				+= power.o
 acpi-y				+= event.o
 acpi-y				+= sysfs.o
@@ -73,6 +74,7 @@ obj-$(CONFIG_ACPI_HED)		+= hed.o
 obj-$(CONFIG_ACPI_EC_DEBUGFS)	+= ec_sys.o
 obj-$(CONFIG_ACPI_CUSTOM_METHOD)+= custom_method.o
 obj-$(CONFIG_ACPI_BGRT)		+= bgrt.o
+obj-$(CONFIG_ACPI_THERMAL_REL)	+= acpi_thermal_rel.o
 
 # processor has its own "processor." module_param namespace
 processor-y			:= processor_driver.o processor_throttling.o
@@ -84,3 +86,10 @@ obj-$(CONFIG_ACPI_PROCESSOR_AGGREGATOR) += acpi_pad.o
 obj-$(CONFIG_ACPI_APEI)		+= apei/
 
 obj-$(CONFIG_ACPI_EXTLOG)	+= acpi_extlog.o
+
+obj-$(CONFIG_PMIC_OPREGION)	+= pmic_opregion/intel_soc_pmic_opregion.o
+obj-$(CONFIG_CRC_PMIC_OPREGION) += pmic_opregion/intel_soc_pmic_crc_opregion.o
+obj-$(CONFIG_WC_PMIC_OPREGION) += pmic_opregion/intel_soc_pmic_wc_opregion.o
+obj-$(CONFIG_DC_PMIC_OPREGION) += pmic_opregion/intel_soc_pmic_dc_opregion.o
+obj-$(CONFIG_DC_TI_PMIC_OPREGION) += pmic_opregion/intel_soc_pmic_dc_ti_opregion.o
+

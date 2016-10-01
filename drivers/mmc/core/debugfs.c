@@ -126,6 +126,9 @@ static int mmc_ios_show(struct seq_file *s, void *data)
 	case MMC_TIMING_SD_HS:
 		str = "sd high-speed";
 		break;
+	case MMC_TIMING_UHS_SDR25:
+		str = "sd uhs SDR25";
+		break;
 	case MMC_TIMING_UHS_SDR50:
 		str = "sd uhs SDR50";
 		break;
@@ -135,8 +138,14 @@ static int mmc_ios_show(struct seq_file *s, void *data)
 	case MMC_TIMING_UHS_DDR50:
 		str = "sd uhs DDR50";
 		break;
+	case MMC_TIMING_MMC_DDR52:
+		str = "mmc DDR52";
+		break;
 	case MMC_TIMING_MMC_HS200:
-		str = "mmc high-speed SDR200";
+		str = "mmc HS200";
+		break;
+	case MMC_TIMING_MMC_HS400:
+		str = "mmc HS400";
 		break;
 	default:
 		str = "invalid";
@@ -158,7 +167,7 @@ static int mmc_ios_show(struct seq_file *s, void *data)
 		str = "invalid";
 		break;
 	}
-	seq_printf(s, "signal voltage:\t%u (%s)\n", ios->chip_select, str);
+	seq_printf(s, "signal voltage:\t%u (%s)\n", ios->signal_voltage, str);
 
 	return 0;
 }
@@ -189,7 +198,7 @@ static int mmc_clock_opt_set(void *data, u64 val)
 	struct mmc_host *host = data;
 
 	/* We need this check due to input value is u64 */
-	if (val > host->f_max)
+	if ((val > host->f_max) || (val < host->f_min))
 		return -EINVAL;
 
 	mmc_claim_host(host);

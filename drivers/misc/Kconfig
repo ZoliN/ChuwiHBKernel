@@ -411,6 +411,10 @@ config TI_DAC7512
 	  This driver can also be built as a module. If so, the module
 	  will be called ti_dac7512.
 
+config UID_STAT
+	bool "UID based statistics tracking exported to /proc/uid_stat"
+	default n
+
 config VMWARE_BALLOON
 	tristate "VMware Balloon Driver"
 	depends on X86 && HYPERVISOR_GUEST
@@ -515,6 +519,46 @@ config SRAM
 	  the genalloc API. It is supposed to be used for small on-chip SRAM
 	  areas found on many SoCs.
 
+config UID_CPUTIME
+	tristate "Per-UID cpu time statistics"
+	depends on PROFILING
+	help
+	  Per UID based cpu time statistics exported to /proc/uid_cputime
+
+config VLV2_PLAT_CLK
+        tristate "Vlv2 platform clock control driver"
+        ---help---
+         Driver to enable the platform clock control for valleyview2
+
+config MONZA_X
+        tristate "Impinj Monza-x-2K RFID Chip"
+        depends on I2C
+        help
+          This driver provides support for the Impinj Monza-x-2K RFID Chip,
+          Monza x-Dura is UHF Gen2 RFID IC product with 2176bits user NVM,
+          it can be accessed by i2c interface and UHF Gen2 RFID protocol,
+          this driver provide access interface via sysfs for userland.
+
+config PI3USB30532_MUX
+	tristate "PI3USB30532 mux for selecting configuration"
+	depends on I2C
+	---help---
+	  This is usb mux driver which enables swiching the mulitiple
+	  configurations based on the selction. This is for various channels
+	  switching for typec connectors. The swiching includes the setting of
+	  orientation, selecting lanes, etc.
+
+	  Say Y here to enable support for pi2usb3052 mux
+
+config INTEL_WCOVE_GPIO
+        bool "Intel Whiskey Cove PMIC GPIO driver"
+        help
+          This enables intel whiskeycove pmic gpio driver, which is used
+          to control the vbus, vconn and vchrg_in pins.
+
+          Say Y here to enable support for Intel Wcove PMIC gpio driver
+
+source "drivers/misc/pwm/Kconfig"
 source "drivers/misc/c2port/Kconfig"
 source "drivers/misc/eeprom/Kconfig"
 source "drivers/misc/cb710/Kconfig"
@@ -523,7 +567,10 @@ source "drivers/misc/lis3lv02d/Kconfig"
 source "drivers/misc/carma/Kconfig"
 source "drivers/misc/altera-stapl/Kconfig"
 source "drivers/misc/mei/Kconfig"
+source "drivers/misc/intel-ish/Kconfig"
 source "drivers/misc/vmw_vmci/Kconfig"
 source "drivers/misc/mic/Kconfig"
 source "drivers/misc/genwqe/Kconfig"
+source "drivers/misc/dgnss/Kconfig"
+source "drivers/misc/bt_lpm/Kconfig"
 endmenu

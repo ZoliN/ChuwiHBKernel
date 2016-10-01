@@ -35,6 +35,12 @@
 	 A3XX_INT0_CP_AHB_ERROR_HALT |     \
 	 A3XX_INT0_UCHE_OOB_ACCESS)
 
+
+static bool hang_debug = false;
+MODULE_PARM_DESC(hang_debug, "Dump registers when hang is detected (can be slow!)");
+module_param_named(hang_debug, hang_debug, bool, 0600);
+static void a3xx_dump(struct msm_gpu *gpu);
+
 static void a3xx_me_init(struct msm_gpu *gpu)
 {
 	struct msm_ringbuffer *ring = gpu->rb;
@@ -201,11 +207,11 @@ static int a3xx_hw_init(struct msm_gpu *gpu)
 	/* Turn on performance counters: */
 	gpu_write(gpu, REG_A3XX_RBBM_PERFCTR_CTL, 0x01);
 
-	/* Set SP perfcounter 7 to count SP_FS_FULL_ALU_INSTRUCTIONS
-	 * we will use this to augment our hang detection:
-	 */
-	gpu_write(gpu, REG_A3XX_SP_PERFCOUNTER7_SELECT,
-			SP_FS_FULL_ALU_INSTRUCTIONS);
+	/* Enable the perfcntrs that we use.. */
+	for (i = 0; i < gpu->num_perfcntrs; i++) {
+		const struct msm_gpu_perfcntr *perfcntr = &gpu->perfcntrs[i];
+		gpu_write(gpu, perfcntr->select_reg, perfcntr->select_val);
+	}
 
 	gpu_write(gpu, REG_A3XX_RBBM_INT_0_MASK, A3XX_INT0_MASK);
 
@@ -289,6 +295,9 @@ static int a3xx_hw_init(struct msm_gpu *gpu)
 
 static void a3xx_recover(struct msm_gpu *gpu)
 {
+	/* dump registers before resetting gpu, if enabled: */
+	if (hang_debug)
+		a3xx_dump(gpu);
 	gpu_write(gpu, REG_A3XX_RBBM_SW_RESET_CMD, 1);
 	gpu_read(gpu, REG_A3XX_RBBM_SW_RESET_CMD);
 	gpu_write(gpu, REG_A3XX_RBBM_SW_RESET_CMD, 0);
@@ -314,21 +323,13 @@ static void a3xx_destroy(struct msm_gpu *gpu)
 
 static void a3xx_idle(struct msm_gpu *gpu)
 {
-	unsigned long t;
-
 	/* wait for ringbuffer to drain: */
 	adreno_idle(gpu);
 
-	t = jiffies + ADRENO_IDLE_TIMEOUT;
-
 	/* then wait for GPU to finish: */
-	do {
-		uint32_t rbbm_status = gpu_read(gpu, REG_A3XX_RBBM_STATUS);
-		if (!(rbbm_status & A3XX_RBBM_STATUS_GPU_BUSY))
-			return;
-	} while(time_before(jiffies, t));
-
-	DRM_ERROR("timeout waiting for %s to idle!\n", gpu->name);
+	if (spin_until(!(gpu_read(gpu, REG_A3XX_RBBM_STATUS) &
+			A3XX_RBBM_STATUS_GPU_BUSY)))
+		DRM_ERROR("%s: timeout waiting for GPU to idle!\n", gpu->name);
 
 	/* TODO maybe we need to reset GPU here to recover from hang? */
 }
@@ -349,7 +350,6 @@ static irqreturn_t a3xx_irq(struct msm_gpu *gpu)
 	return IRQ_HANDLED;
 }
 
-#ifdef CONFIG_DEBUG_FS
 static const unsigned int a3xx_registers[] = {
 	0x0000, 0x0002, 0x0010, 0x0012, 0x0018, 0x0018, 0x0020, 0x0027,
 	0x0029, 0x002b, 0x002e, 0x0033, 0x0040, 0x0042, 0x0050, 0x005c,
@@ -389,11 +389,18 @@ static const unsigned int a3xx_registers[] = {
 	0x303c, 0x303c, 0x305e, 0x305f,
 };
 
+#ifdef CONFIG_DEBUG_FS
 static void a3xx_show(struct msm_gpu *gpu, struct seq_file *m)
 {
+	struct drm_device *dev = gpu->dev;
 	int i;
 
 	adreno_show(gpu, m);
+
+	mutex_lock(&dev->struct_mutex);
+
+	gpu->funcs->pm_resume(gpu);
+
 	seq_printf(m, "status:   %08x\n",
 			gpu_read(gpu, REG_A3XX_RBBM_STATUS));
 
@@ -409,8 +416,35 @@ static void a3xx_show(struct msm_gpu *gpu, struct seq_file *m)
 			seq_printf(m, "IO:R %08x %08x\n", addr<<2, val);
 		}
 	}
+
+	gpu->funcs->pm_suspend(gpu);
+
+	mutex_unlock(&dev->struct_mutex);
 }
 #endif
+
+/* would be nice to not have to duplicate the _show() stuff with printk(): */
+static void a3xx_dump(struct msm_gpu *gpu)
+{
+	int i;
+
+	adreno_dump(gpu);
+	printk("status:   %08x\n",
+			gpu_read(gpu, REG_A3XX_RBBM_STATUS));
+
+	/* dump these out in a form that can be parsed by demsm: */
+	printk("IO:region %s 00000000 00020000\n", gpu->name);
+	for (i = 0; i < ARRAY_SIZE(a3xx_registers); i += 2) {
+		uint32_t start = a3xx_registers[i];
+		uint32_t end   = a3xx_registers[i+1];
+		uint32_t addr;
+
+		for (addr = start; addr <= end; addr++) {
+			uint32_t val = gpu_read(gpu, addr);
+			printk("IO:R %08x %08x\n", addr<<2, val);
+		}
+	}
+}
 
 static const struct adreno_gpu_funcs funcs = {
 	.base = {
@@ -429,6 +463,13 @@ static const struct adreno_gpu_funcs funcs = {
 		.show = a3xx_show,
 #endif
 	},
+};
+
+static const struct msm_gpu_perfcntr perfcntrs[] = {
+	{ REG_A3XX_SP_PERFCOUNTER6_SELECT, REG_A3XX_RBBM_PERFCTR_SP_6_LO,
+			SP_ALU_ACTIVE_CYCLES, "ALUACTIVE" },
+	{ REG_A3XX_SP_PERFCOUNTER7_SELECT, REG_A3XX_RBBM_PERFCTR_SP_7_LO,
+			SP_FS_FULL_ALU_INSTRUCTIONS, "ALUFULL" },
 };
 
 struct msm_gpu *a3xx_gpu_init(struct drm_device *dev)
@@ -469,6 +510,9 @@ struct msm_gpu *a3xx_gpu_init(struct drm_device *dev)
 
 	DBG("fast_rate=%u, slow_rate=%u, bus_freq=%u",
 			gpu->fast_rate, gpu->slow_rate, gpu->bus_freq);
+
+	gpu->perfcntrs = perfcntrs;
+	gpu->num_perfcntrs = ARRAY_SIZE(perfcntrs);
 
 	ret = adreno_gpu_init(dev, pdev, adreno_gpu, &funcs, config->rev);
 	if (ret)

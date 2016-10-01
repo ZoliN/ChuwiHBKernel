@@ -98,6 +98,7 @@ enum {
 	IRQ_NOTHREAD		= (1 << 16),
 	IRQ_PER_CPU_DEVID	= (1 << 17),
 	IRQ_IS_POLLED		= (1 << 18),
+	IRQ_CHAINED		= (1 << 19),
 };
 
 #define IRQF_MODIFY_MASK	\
@@ -593,6 +594,8 @@ static inline u32 irq_get_trigger_type(unsigned int irq)
 	struct irq_data *d = irq_get_irq_data(irq);
 	return d ? irqd_get_trigger_type(d) : 0;
 }
+
+unsigned int arch_dynirq_lower_bound(unsigned int from);
 
 int __irq_alloc_descs(int irq, unsigned int from, unsigned int cnt, int node,
 		struct module *owner);

@@ -34,6 +34,13 @@
 #define DW_IC_CON_RESTART_EN		0x20
 #define DW_IC_CON_SLAVE_DISABLE		0x40
 
+/*
+ * status codes
+ */
+#define STATUS_IDLE			0x0
+#define STATUS_WRITE_IN_PROGRESS	0x1
+#define STATUS_READ_IN_PROGRESS		0x2
+#define STATUS_SUSPENDED		0x4
 
 /**
  * struct dw_i2c_dev - private i2c-designware data
@@ -65,6 +72,7 @@
  * @ss_lcnt: standard speed LCNT value
  * @fs_hcnt: fast speed HCNT value
  * @fs_lcnt: fast speed LCNT value
+ * @shared_host: if this host is shared by other units on the SoC
  *
  * HCNT and LCNT parameters can be used if the platform knows more accurate
  * values than the one computed based only on the input clock frequency.
@@ -77,6 +85,7 @@ struct dw_i2c_dev {
 	struct mutex		lock;
 	struct clk		*clk;
 	u32			(*get_clk_rate_khz) (struct dw_i2c_dev *dev);
+	u32			clk_rate_khz;
 	struct dw_pci_controller *controller;
 	int			cmd_err;
 	struct i2c_msg		*msgs;
@@ -103,6 +112,10 @@ struct dw_i2c_dev {
 	u16			ss_lcnt;
 	u16			fs_hcnt;
 	u16			fs_lcnt;
+	int			shared_host;
+	int                     polling;
+	int			(*acquire_ownership) (void);
+	int			(*release_ownership) (void);
 };
 
 #define ACCESS_SWAP		0x00000001

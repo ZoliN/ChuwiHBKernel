@@ -70,6 +70,8 @@
 #define EDID_QUIRK_FORCE_REDUCED_BLANKING	(1 << 7)
 /* Force 8bpc */
 #define EDID_QUIRK_FORCE_8BPC			(1 << 8)
+/* Force 12bpc */
+#define EDID_QUIRK_FORCE_12BPC			(1 << 9)
 
 struct detailed_mode_closure {
 	struct drm_connector *connector;
@@ -125,6 +127,9 @@ static struct edid_quirk {
 	{ "SAM", 596, EDID_QUIRK_PREFER_LARGE_60 },
 	{ "SAM", 638, EDID_QUIRK_PREFER_LARGE_60 },
 
+	/* Sony PVM-2541A does up to 12 bpc, but only reports max 8 bpc */
+	{ "SNY", 0x2541, EDID_QUIRK_FORCE_12BPC },
+
 	/* ViewSonic VA2026w */
 	{ "VSC", 5020, EDID_QUIRK_FORCE_REDUCED_BLANKING },
 
@@ -154,7 +159,7 @@ static const struct drm_display_mode drm_dmt_modes[] = {
 		   DRM_MODE_FLAG_NHSYNC | DRM_MODE_FLAG_PVSYNC) },
 	/* 640x480@60Hz */
 	{ DRM_MODE("640x480", DRM_MODE_TYPE_DRIVER, 25175, 640, 656,
-		   752, 800, 0, 480, 489, 492, 525, 0,
+		   752, 800, 0, 480, 490, 492, 525, 0,
 		   DRM_MODE_FLAG_NHSYNC | DRM_MODE_FLAG_NVSYNC) },
 	/* 640x480@72Hz */
 	{ DRM_MODE("640x480", DRM_MODE_TYPE_DRIVER, 31500, 640, 664,
@@ -984,9 +989,13 @@ static const u8 edid_header[] = {
 	0x00, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x00
 };
 
- /*
- * Sanity check the header of the base EDID block.  Return 8 if the header
- * is perfect, down to 0 if it's totally wrong.
+/**
+ * drm_edid_header_is_valid - sanity check the header of the base EDID block
+ * @raw_edid: pointer to raw base EDID block
+ *
+ * Sanity check the header of the base EDID block.
+ *
+ * Return: 8 if the header is perfect, down to 0 if it's totally wrong.
  */
 int drm_edid_header_is_valid(const u8 *raw_edid)
 {
@@ -1005,11 +1014,20 @@ module_param_named(edid_fixup, edid_fixup, int, 0400);
 MODULE_PARM_DESC(edid_fixup,
 		 "Minimum number of valid EDID header bytes (0-8, default 6)");
 
-/*
- * Sanity check the EDID block (base or extension).  Return 0 if the block
- * doesn't check out, or 1 if it's valid.
+/**
+ * drm_edid_block_valid - Sanity check the EDID block (base or extension)
+ * @raw_edid: pointer to raw EDID block
+ * @block: type of block to validate (0 for base, extension otherwise)
+ * @print_bad_edid: if true, dump bad EDID blocks to the console
+ * @edid_corrupt: if true, the header or checksum is invalid
+ *
+ * Validate a base or extension EDID block and optionally dump bad blocks to
+ * the console.
+ *
+ * Return: True if the block is valid, false otherwise.
  */
-bool drm_edid_block_valid(u8 *raw_edid, int block, bool print_bad_edid)
+bool drm_edid_block_valid(u8 *raw_edid, int block, bool print_bad_edid,
+			  bool *edid_corrupt)
 {
 	int i;
 	u8 csum = 0;
@@ -1023,11 +1041,22 @@ bool drm_edid_block_valid(u8 *raw_edid, int block, bool print_bad_edid)
 
 	if (block == 0) {
 		int score = drm_edid_header_is_valid(raw_edid);
-		if (score == 8) ;
-		else if (score >= edid_fixup) {
+		if (score == 8) {
+			if (edid_corrupt)
+				*edid_corrupt = 0;
+		} else if (score >= edid_fixup) {
+			/* Displayport Link CTS Core 1.2 rev1.1 test 4.2.2.6
+			 * The corrupt flag needs to be set here otherwise, the
+			 * fix-up code here will correct the problem, the
+			 * checksum is correct and the test fails
+			 */
+			if (edid_corrupt)
+				*edid_corrupt = 1;
 			DRM_DEBUG("Fixing EDID header, your hardware may be failing\n");
 			memcpy(raw_edid, edid_header, sizeof(edid_header));
 		} else {
+			if (edid_corrupt)
+				*edid_corrupt = 1;
 			goto bad;
 		}
 	}
@@ -1038,6 +1067,9 @@ bool drm_edid_block_valid(u8 *raw_edid, int block, bool print_bad_edid)
 		if (print_bad_edid) {
 			DRM_ERROR("EDID checksum is invalid, remainder is %d\n", csum);
 		}
+
+		if (edid_corrupt)
+			*edid_corrupt = 1;
 
 		/* allow CEA to slide through, switches mangle this */
 		if (raw_edid[0] != 0x02)
@@ -1077,6 +1109,8 @@ EXPORT_SYMBOL(drm_edid_block_valid);
  * @edid: EDID data
  *
  * Sanity-check an entire EDID record (including extensions)
+ *
+ * Return: True if the EDID data is valid, false otherwise.
  */
 bool drm_edid_is_valid(struct edid *edid)
 {
@@ -1087,7 +1121,7 @@ bool drm_edid_is_valid(struct edid *edid)
 		return false;
 
 	for (i = 0; i <= edid->extensions; i++)
-		if (!drm_edid_block_valid(raw + i * EDID_LENGTH, i, true))
+		if (!drm_edid_block_valid(raw + i * EDID_LENGTH, i, true, NULL))
 			return false;
 
 	return true;
@@ -1096,14 +1130,15 @@ EXPORT_SYMBOL(drm_edid_is_valid);
 
 #define DDC_SEGMENT_ADDR 0x30
 /**
- * Get EDID information via I2C.
+ * drm_do_probe_ddc_edid() - get EDID information via I2C
+ * @adapter: I2C device adaptor
+ * @buf: EDID data buffer to be filled
+ * @block: 128 byte EDID block to start fetching from
+ * @len: EDID data buffer length to fetch
  *
- * \param adapter : i2c device adaptor
- * \param buf     : EDID data buffer to be filled
- * \param len     : EDID data buffer length
- * \return 0 on success or -1 on failure.
+ * Try to fetch EDID information by calling I2C driver functions.
  *
- * Try to fetch EDID information by calling i2c driver function.
+ * Return: 0 on success or -1 on failure.
  */
 static int
 drm_do_probe_ddc_edid(struct i2c_adapter *adapter, unsigned char *buf,
@@ -1114,7 +1149,8 @@ drm_do_probe_ddc_edid(struct i2c_adapter *adapter, unsigned char *buf,
 	unsigned char xfers = segment ? 3 : 2;
 	int ret, retries = 5;
 
-	/* The core i2c driver will automatically retry the transfer if the
+	/*
+	 * The core I2C driver will automatically retry the transfer if the
 	 * adapter reports EAGAIN. However, we find that bit-banging transfers
 	 * are susceptible to errors under a heavily loaded machine and
 	 * generate spurious NAKs and timeouts. Retrying the transfer
@@ -1140,10 +1176,10 @@ drm_do_probe_ddc_edid(struct i2c_adapter *adapter, unsigned char *buf,
 			}
 		};
 
-	/*
-	 * Avoid sending the segment addr to not upset non-compliant ddc
-	 * monitors.
-	 */
+		/*
+		 * Avoid sending the segment addr to not upset non-compliant
+		 * DDC monitors.
+		 */
 		ret = i2c_transfer(adapter, &msgs[3 - xfers], xfers);
 
 		if (ret == -ENXIO) {
@@ -1178,7 +1214,8 @@ drm_do_get_edid(struct drm_connector *connector, struct i2c_adapter *adapter)
 	for (i = 0; i < 4; i++) {
 		if (drm_do_probe_ddc_edid(adapter, block, 0, EDID_LENGTH))
 			goto out;
-		if (drm_edid_block_valid(block, 0, print_bad_edid))
+		if (drm_edid_block_valid(block, 0, print_bad_edid,
+					 &connector->edid_corrupt))
 			break;
 		if (i == 0 && drm_edid_is_zero(block, EDID_LENGTH)) {
 			connector->null_edid_counter++;
@@ -1203,7 +1240,10 @@ drm_do_get_edid(struct drm_connector *connector, struct i2c_adapter *adapter)
 				  block + (valid_extensions + 1) * EDID_LENGTH,
 				  j, EDID_LENGTH))
 				goto out;
-			if (drm_edid_block_valid(block + (valid_extensions + 1) * EDID_LENGTH, j, print_bad_edid)) {
+			if (drm_edid_block_valid(block + (valid_extensions + 1)
+						 * EDID_LENGTH, j,
+						 print_bad_edid,
+						 NULL)) {
 				valid_extensions++;
 				break;
 			}
@@ -1212,7 +1252,7 @@ drm_do_get_edid(struct drm_connector *connector, struct i2c_adapter *adapter)
 		if (i == 4 && print_bad_edid) {
 			dev_warn(connector->dev->dev,
 			 "%s: Ignoring invalid EDID block %d.\n",
-			 drm_get_connector_name(connector), j);
+			 connector->name, j);
 
 			connector->bad_edid_counter++;
 		}
@@ -1232,7 +1272,7 @@ drm_do_get_edid(struct drm_connector *connector, struct i2c_adapter *adapter)
 carp:
 	if (print_bad_edid) {
 		dev_warn(connector->dev->dev, "%s: EDID block %d invalid.\n",
-			 drm_get_connector_name(connector), j);
+			 connector->name, j);
 	}
 	connector->bad_edid_counter++;
 
@@ -1242,10 +1282,10 @@ out:
 }
 
 /**
- * Probe DDC presence.
+ * drm_probe_ddc() - probe DDC presence
+ * @adapter: I2C adapter to probe
  *
- * \param adapter : i2c device adaptor
- * \return 1 on success
+ * Return: True on success, false on failure.
  */
 bool
 drm_probe_ddc(struct i2c_adapter *adapter)
@@ -1259,12 +1299,12 @@ EXPORT_SYMBOL(drm_probe_ddc);
 /**
  * drm_get_edid - get EDID data, if available
  * @connector: connector we're probing
- * @adapter: i2c adapter to use for DDC
+ * @adapter: I2C adapter to use for DDC
  *
- * Poke the given i2c channel to grab EDID data if possible.  If found,
+ * Poke the given I2C channel to grab EDID data if possible.  If found,
  * attach it to the connector.
  *
- * Return edid data or NULL if we couldn't find any.
+ * Return: Pointer to valid EDID or NULL if we couldn't find any.
  */
 struct edid *drm_get_edid(struct drm_connector *connector,
 			  struct i2c_adapter *adapter)
@@ -1282,7 +1322,7 @@ EXPORT_SYMBOL(drm_get_edid);
  * drm_edid_duplicate - duplicate an EDID and the extensions
  * @edid: EDID to duplicate
  *
- * Return duplicate edid or NULL on allocation failure.
+ * Return: Pointer to duplicated EDID or NULL on allocation failure.
  */
 struct edid *drm_edid_duplicate(const struct edid *edid)
 {
@@ -1405,7 +1445,8 @@ mode_is_rb(const struct drm_display_mode *mode)
  * @rb: Mode reduced-blanking-ness
  *
  * Walk the DMT mode list looking for a match for the given parameters.
- * Return a newly allocated copy of the mode, or NULL if not found.
+ *
+ * Return: A newly allocated copy of the mode, or NULL if not found.
  */
 struct drm_display_mode *drm_mode_find_dmt(struct drm_device *dev,
 					   int hsize, int vsize, int fresh,
@@ -1586,15 +1627,16 @@ bad_std_timing(u8 a, u8 b)
 
 /**
  * drm_mode_std - convert standard mode info (width, height, refresh) into mode
+ * @connector: connector of for the EDID block
+ * @edid: EDID block to scan
  * @t: standard timing params
- * @timing_level: standard timing level
  *
  * Take the standard timing params (in this case width, aspect, and refresh)
  * and convert them into a real mode using CVT/GTF/DMT.
  */
 static struct drm_display_mode *
 drm_mode_std(struct drm_connector *connector, struct edid *edid,
-	     struct std_timing *t, int revision)
+	     struct std_timing *t)
 {
 	struct drm_device *dev = connector->dev;
 	struct drm_display_mode *m, *mode = NULL;
@@ -1615,7 +1657,7 @@ drm_mode_std(struct drm_connector *connector, struct edid *edid,
 	vrefresh_rate = vfreq + 60;
 	/* the vdisplay is calculated based on the aspect ratio */
 	if (aspect_ratio == 0) {
-		if (revision < 3)
+		if (edid->revision < 3)
 			vsize = hsize;
 		else
 			vsize = (hsize * 10) / 16;
@@ -2132,6 +2174,7 @@ do_established_modes(struct detailed_timing *timing, void *c)
 
 /**
  * add_established_modes - get est. modes from EDID and add them
+ * @connector: connector to add mode(s) to
  * @edid: EDID block to scan
  *
  * Each EDID block contains a bitmap of the supported "established modes" list
@@ -2182,8 +2225,7 @@ do_standard_modes(struct detailed_timing *timing, void *c)
 			struct drm_display_mode *newmode;
 
 			std = &data->data.timings[i];
-			newmode = drm_mode_std(connector, edid, std,
-					       edid->revision);
+			newmode = drm_mode_std(connector, edid, std);
 			if (newmode) {
 				drm_mode_probed_add(connector, newmode);
 				closure->modes++;
@@ -2194,6 +2236,7 @@ do_standard_modes(struct detailed_timing *timing, void *c)
 
 /**
  * add_standard_modes - get std. modes from EDID and add them
+ * @connector: connector to add mode(s) to
  * @edid: EDID block to scan
  *
  * Standard modes can be calculated using the appropriate standard (DMT,
@@ -2211,8 +2254,7 @@ add_standard_modes(struct drm_connector *connector, struct edid *edid)
 		struct drm_display_mode *newmode;
 
 		newmode = drm_mode_std(connector, edid,
-				       &edid->standard_timings[i],
-				       edid->revision);
+				       &edid->standard_timings[i]);
 		if (newmode) {
 			drm_mode_probed_add(connector, newmode);
 			modes++;
@@ -2387,6 +2429,27 @@ static u8 *drm_find_cea_extension(struct edid *edid)
 }
 
 /*
+ * helper function to check whether two clocks can fall into the same VIC.
+ *
+ * Returns: true if possible, false otherwise.
+ */
+static bool drm_check_clock_match(int target, int reference)
+{
+	/*
+	 * check target clock is in range of 60Hz or 59.94
+	 * (reference * 1000/1001) with (-0.5%, +0.5%) tolerance.
+	 * Based on CEA spec, when determining whether two video timings
+	 * are identical, clock frequencey within (-0.5%, +0.5%) tolerance
+	 * should be considered as the same.
+	 */
+
+	if (target >= DIV_ROUND_UP(reference * 995, 1001) &&
+		target <= DIV_ROUND_UP(reference * 1005, 1000))
+		return true;
+	return false;
+}
+
+/*
  * Calculate the alternate clock for the CEA mode
  * (60Hz vs. 59.94Hz etc.)
  */
@@ -2415,7 +2478,7 @@ cea_mode_alternate_clock(const struct drm_display_mode *cea_mode)
  * drm_match_cea_mode - look for a CEA mode matching given mode
  * @to_match: display mode
  *
- * Returns the CEA Video ID (VIC) of the mode or 0 if it isn't a CEA-861
+ * Return: The CEA Video ID (VIC) of the mode or 0 if it isn't a CEA-861
  * mode.
  */
 u8 drm_match_cea_mode(const struct drm_display_mode *to_match)
@@ -2427,20 +2490,31 @@ u8 drm_match_cea_mode(const struct drm_display_mode *to_match)
 
 	for (mode = 0; mode < ARRAY_SIZE(edid_cea_modes); mode++) {
 		const struct drm_display_mode *cea_mode = &edid_cea_modes[mode];
-		unsigned int clock1, clock2;
-
-		/* Check both 60Hz and 59.94Hz */
-		clock1 = cea_mode->clock;
-		clock2 = cea_mode_alternate_clock(cea_mode);
-
-		if ((KHZ2PICOS(to_match->clock) == KHZ2PICOS(clock1) ||
-		     KHZ2PICOS(to_match->clock) == KHZ2PICOS(clock2)) &&
-		    drm_mode_equal_no_clocks_no_stereo(to_match, cea_mode))
+		if (drm_check_clock_match(to_match->clock, cea_mode->clock) &&
+		    drm_mode_equal_no_clocks_no_stereo(to_match, cea_mode) &&
+		    to_match->picture_aspect_ratio ==
+				cea_mode->picture_aspect_ratio)
 			return mode + 1;
 	}
 	return 0;
 }
 EXPORT_SYMBOL(drm_match_cea_mode);
+
+/**
+ * drm_get_cea_aspect_ratio - get the picture aspect ratio corresponding to
+ * the input VIC from the CEA mode list
+ * @video_code: ID given to each of the CEA modes
+ *
+ * Returns picture aspect ratio
+ */
+enum hdmi_picture_aspect drm_get_cea_aspect_ratio(const u8 video_code)
+{
+	/* return picture aspect ratio for video_code - 1 to access the
+	 * right array element
+	*/
+	return edid_cea_modes[video_code-1].picture_aspect_ratio;
+}
+EXPORT_SYMBOL(drm_get_cea_aspect_ratio);
 
 /*
  * Calculate the alternate clock for HDMI modes (those from the HDMI vendor
@@ -2580,6 +2654,9 @@ drm_display_mode_from_vic_index(struct drm_connector *connector,
 		return NULL;
 
 	newmode = drm_mode_duplicate(dev, &edid_cea_modes[cea_mode]);
+	if (!newmode)
+		return NULL;
+
 	newmode->vrefresh = 0;
 
 	return newmode;
@@ -3010,11 +3087,9 @@ monitor_name(struct detailed_timing *t, void *data)
  * @connector: connector corresponding to the HDMI/DP sink
  * @edid: EDID to parse
  *
- * Fill the ELD (EDID-Like Data) buffer for passing to the audio driver.
- * Some ELD fields are left to the graphics driver caller:
- * - Conn_Type
- * - HDCP
- * - Port_ID
+ * Fill the ELD (EDID-Like Data) buffer for passing to the audio driver. The
+ * Conn_Type, HDCP and Port_ID ELD fields are left for the graphics driver to
+ * fill in.
  */
 void drm_edid_to_eld(struct drm_connector *connector, struct edid *edid)
 {
@@ -3086,6 +3161,13 @@ void drm_edid_to_eld(struct drm_connector *connector, struct edid *edid)
 		}
 	}
 	eld[5] |= sad_count << 4;
+	/*
+	 * Audio driver expects the second and third bits
+	 * of fifth byte of ELD to be 01 for DP.
+	 * So, setting second bit to be 1.
+	 */
+	if (connector->connector_type == DRM_MODE_CONNECTOR_DisplayPort)
+		eld[5] |= ELD_DP_CONNECTION_TYPE;
 	eld[2] = (20 + mnl + sad_count * 3 + 3) / 4;
 
 	DRM_DEBUG_KMS("ELD size %d, SAD count %d\n", (int)eld[2], sad_count);
@@ -3098,9 +3180,10 @@ EXPORT_SYMBOL(drm_edid_to_eld);
  * @sads: pointer that will be set to the extracted SADs
  *
  * Looks for CEA EDID block and extracts SADs (Short Audio Descriptors) from it.
- * Note: returned pointer needs to be kfreed
  *
- * Return number of found SADs or negative number on error.
+ * Note: The returned pointer needs to be freed using kfree().
+ *
+ * Return: The number of found SADs or negative number on error.
  */
 int drm_edid_to_sad(struct edid *edid, struct cea_sad **sads)
 {
@@ -3157,9 +3240,11 @@ EXPORT_SYMBOL(drm_edid_to_sad);
  * @sadb: pointer to the speaker block
  *
  * Looks for CEA EDID block and extracts the Speaker Allocation Data Block from it.
- * Note: returned pointer needs to be kfreed
  *
- * Return number of found Speaker Allocation Blocks or negative number on error.
+ * Note: The returned pointer needs to be freed using kfree().
+ *
+ * Return: The number of found Speaker Allocation Blocks or negative number on
+ * error.
  */
 int drm_edid_to_speaker_allocation(struct edid *edid, u8 **sadb)
 {
@@ -3191,10 +3276,9 @@ int drm_edid_to_speaker_allocation(struct edid *edid, u8 **sadb)
 
 			/* Speaker Allocation Data Block */
 			if (dbl == 3) {
-				*sadb = kmalloc(dbl, GFP_KERNEL);
+				*sadb = kmemdup(&db[1], dbl, GFP_KERNEL);
 				if (!*sadb)
 					return -ENOMEM;
-				memcpy(*sadb, &db[1], dbl);
 				count = dbl;
 				break;
 			}
@@ -3206,9 +3290,12 @@ int drm_edid_to_speaker_allocation(struct edid *edid, u8 **sadb)
 EXPORT_SYMBOL(drm_edid_to_speaker_allocation);
 
 /**
- * drm_av_sync_delay - HDMI/DP sink audio-video sync delay in millisecond
+ * drm_av_sync_delay - compute the HDMI/DP sink audio-video sync delay
  * @connector: connector associated with the HDMI/DP sink
  * @mode: the display mode
+ *
+ * Return: The HDMI/DP sink's audio-video sync delay in milliseconds or 0 if
+ * the sink doesn't support audio or video.
  */
 int drm_av_sync_delay(struct drm_connector *connector,
 		      struct drm_display_mode *mode)
@@ -3250,12 +3337,17 @@ EXPORT_SYMBOL(drm_av_sync_delay);
  *
  * It's possible for one encoder to be associated with multiple HDMI/DP sinks.
  * The policy is now hard coded to simply use the first HDMI/DP sink's ELD.
+ *
+ * Return: The connector associated with the first HDMI/DP sink that has ELD
+ * attached to it.
  */
 struct drm_connector *drm_select_eld(struct drm_encoder *encoder,
 				     struct drm_display_mode *mode)
 {
 	struct drm_connector *connector;
 	struct drm_device *dev = encoder->dev;
+
+	WARN_ON(!mutex_is_locked(&dev->mode_config.mutex));
 
 	list_for_each_entry(connector, &dev->mode_config.connector_list, head)
 		if (connector->encoder == encoder && connector->eld[0])
@@ -3266,11 +3358,12 @@ struct drm_connector *drm_select_eld(struct drm_encoder *encoder,
 EXPORT_SYMBOL(drm_select_eld);
 
 /**
- * drm_detect_hdmi_monitor - detect whether monitor is hdmi.
+ * drm_detect_hdmi_monitor - detect whether monitor is HDMI
  * @edid: monitor EDID information
  *
  * Parse the CEA extension according to CEA-861-B.
- * Return true if HDMI, false if not or unknown.
+ *
+ * Return: True if the monitor is HDMI, false if not or unknown.
  */
 bool drm_detect_hdmi_monitor(struct edid *edid)
 {
@@ -3300,6 +3393,7 @@ EXPORT_SYMBOL(drm_detect_hdmi_monitor);
 
 /**
  * drm_detect_monitor_audio - check monitor audio capability
+ * @edid: EDID block to scan
  *
  * Monitor should have CEA extension block.
  * If monitor has 'basic audio', but no CEA audio blocks, it's 'basic
@@ -3307,6 +3401,7 @@ EXPORT_SYMBOL(drm_detect_hdmi_monitor);
  * audio format, assume at least 'basic audio' support, even if 'basic
  * audio' is not defined in EDID.
  *
+ * Return: True if the monitor supports audio, false otherwise.
  */
 bool drm_detect_monitor_audio(struct edid *edid)
 {
@@ -3345,10 +3440,13 @@ EXPORT_SYMBOL(drm_detect_monitor_audio);
 
 /**
  * drm_rgb_quant_range_selectable - is RGB quantization range selectable?
+ * @edid: EDID block to scan
  *
  * Check whether the monitor reports the RGB quantization range selection
  * as supported. The AVI infoframe can then be used to inform the monitor
  * which quantization range (full or limited) is used.
+ *
+ * Return: True if the RGB quantization range is selectable, false otherwise.
  */
 bool drm_rgb_quant_range_selectable(struct edid *edid)
 {
@@ -3375,16 +3473,119 @@ bool drm_rgb_quant_range_selectable(struct edid *edid)
 EXPORT_SYMBOL(drm_rgb_quant_range_selectable);
 
 /**
+ * drm_assign_hdmi_deep_color_info - detect whether monitor supports
+ * hdmi deep color modes and update drm_display_info if so.
+ *
+ * @edid: monitor EDID information
+ * @info: Updated with maximum supported deep color bpc and color format
+ *        if deep color supported.
+ *
+ * Parse the CEA extension according to CEA-861-B.
+ * Return true if HDMI deep color supported, false if not or unknown.
+ */
+static bool drm_assign_hdmi_deep_color_info(struct edid *edid,
+                                            struct drm_display_info *info,
+                                            struct drm_connector *connector)
+{
+	u8 *edid_ext, *hdmi;
+	int i;
+	int start_offset, end_offset;
+	unsigned int dc_bpc = 0;
+
+	edid_ext = drm_find_cea_extension(edid);
+	if (!edid_ext)
+		return false;
+
+	if (cea_db_offsets(edid_ext, &start_offset, &end_offset))
+		return false;
+
+	/*
+	 * Because HDMI identifier is in Vendor Specific Block,
+	 * search it from all data blocks of CEA extension.
+	 */
+	for_each_cea_db(edid_ext, i, start_offset, end_offset) {
+		if (cea_db_is_hdmi_vsdb(&edid_ext[i])) {
+			/* HDMI supports at least 8 bpc */
+			info->bpc = 8;
+
+			hdmi = &edid_ext[i];
+			if (cea_db_payload_len(hdmi) < 6)
+				return false;
+
+			if (hdmi[6] & DRM_EDID_HDMI_DC_30) {
+				dc_bpc = 10;
+				info->edid_hdmi_dc_modes |= DRM_EDID_HDMI_DC_30;
+				DRM_DEBUG("%s: HDMI sink does deep color 30.\n",
+						  connector->name);
+			}
+
+			if (hdmi[6] & DRM_EDID_HDMI_DC_36) {
+				dc_bpc = 12;
+				info->edid_hdmi_dc_modes |= DRM_EDID_HDMI_DC_36;
+				DRM_DEBUG("%s: HDMI sink does deep color 36.\n",
+						  connector->name);
+			}
+
+			if (hdmi[6] & DRM_EDID_HDMI_DC_48) {
+				dc_bpc = 16;
+				info->edid_hdmi_dc_modes |= DRM_EDID_HDMI_DC_48;
+				DRM_DEBUG("%s: HDMI sink does deep color 48.\n",
+						  connector->name);
+			}
+
+			if (dc_bpc > 0) {
+				DRM_DEBUG("%s: Assigning HDMI sink color depth as %d bpc.\n",
+						  connector->name, dc_bpc);
+				info->bpc = dc_bpc;
+
+				/*
+				 * Deep color support mandates RGB444 support for all video
+				 * modes and forbids YCRCB422 support for all video modes per
+				 * HDMI 1.3 spec.
+				 */
+				info->color_formats = DRM_COLOR_FORMAT_RGB444;
+
+				/* YCRCB444 is optional according to spec. */
+				if (hdmi[6] & DRM_EDID_HDMI_DC_Y444) {
+					info->color_formats |= DRM_COLOR_FORMAT_YCRCB444;
+					DRM_DEBUG("%s: HDMI sink does YCRCB444 in deep color.\n",
+							  connector->name);
+				}
+
+				/*
+				 * Spec says that if any deep color mode is supported at all,
+				 * then deep color 36 bit must be supported.
+				 */
+				if (!(hdmi[6] & DRM_EDID_HDMI_DC_36)) {
+					DRM_DEBUG("%s: HDMI sink should do DC_36, but does not!\n",
+							  connector->name);
+				}
+
+				return true;
+			}
+			else {
+				DRM_DEBUG("%s: No deep color support on this HDMI sink.\n",
+						  connector->name);
+			}
+		}
+	}
+
+	return false;
+}
+
+/**
  * drm_add_display_info - pull display info out if present
  * @edid: EDID data
  * @info: display info (attached to connector)
+ * @connector: connector whose edid is used to build display info
  *
  * Grab any available display info and stuff it into the drm_display_info
  * structure that's part of the connector.  Useful for tracking bpp and
  * color spaces.
  */
 static void drm_add_display_info(struct edid *edid,
-				 struct drm_display_info *info)
+                                 struct drm_display_info *info,
+                                 struct drm_connector *connector)
 {
 	u8 *edid_ext;
 
@@ -3413,6 +3614,9 @@ static void drm_add_display_info(struct edid *edid,
 		if (edid_ext[3] & EDID_CEA_YCRCB422)
 			info->color_formats |= DRM_COLOR_FORMAT_YCRCB422;
 	}
+
+	/* HDMI deep color modes supported? Assign to info, if so */
+	drm_assign_hdmi_deep_color_info(edid, info, connector);
 
 	/* Only defined for 1.4 with digital displays */
 	if (edid->revision < 4)
@@ -3443,6 +3647,9 @@ static void drm_add_display_info(struct edid *edid,
 		break;
 	}
 
+	DRM_DEBUG("%s: Assigning EDID-1.4 digital sink color depth as %d bpc.\n",
+			  connector->name, info->bpc);
+
 	info->color_formats |= DRM_COLOR_FORMAT_RGB444;
 	if (edid->features & DRM_EDID_FEATURE_RGB_YCRCB444)
 		info->color_formats |= DRM_COLOR_FORMAT_YCRCB444;
@@ -3453,11 +3660,11 @@ static void drm_add_display_info(struct edid *edid,
 /**
  * drm_add_edid_modes - add modes from EDID data, if available
  * @connector: connector we're probing
- * @edid: edid data
+ * @edid: EDID data
  *
  * Add the specified modes to the connector's mode list.
  *
- * Return number of modes added or 0 if we couldn't find any.
+ * Return: The number of modes added or 0 if we couldn't find any.
  */
 int drm_add_edid_modes(struct drm_connector *connector, struct edid *edid)
 {
@@ -3469,7 +3676,7 @@ int drm_add_edid_modes(struct drm_connector *connector, struct edid *edid)
 	}
 	if (!drm_edid_is_valid(edid)) {
 		dev_warn(connector->dev->dev, "%s: EDID invalid.\n",
-			 drm_get_connector_name(connector));
+			 connector->name);
 		return 0;
 	}
 
@@ -3501,10 +3708,13 @@ int drm_add_edid_modes(struct drm_connector *connector, struct edid *edid)
 	if (quirks & (EDID_QUIRK_PREFER_LARGE_60 | EDID_QUIRK_PREFER_LARGE_75))
 		edid_fixup_preferred(connector, quirks);
 
-	drm_add_display_info(edid, &connector->display_info);
+	drm_add_display_info(edid, &connector->display_info, connector);
 
 	if (quirks & EDID_QUIRK_FORCE_8BPC)
 		connector->display_info.bpc = 8;
+
+	if (quirks & EDID_QUIRK_FORCE_12BPC)
+		connector->display_info.bpc = 12;
 
 	return num_modes;
 }
@@ -3519,7 +3729,7 @@ EXPORT_SYMBOL(drm_add_edid_modes);
  * Add the specified modes to the connector's mode list. Only when the
  * hdisplay/vdisplay is not beyond the given limit, it will be added.
  *
- * Return number of modes added or 0 if we couldn't find any.
+ * Return: The number of modes added or 0 if we couldn't find any.
  */
 int drm_add_modes_noedid(struct drm_connector *connector,
 			int hdisplay, int vdisplay)
@@ -3558,14 +3768,23 @@ int drm_add_modes_noedid(struct drm_connector *connector,
 }
 EXPORT_SYMBOL(drm_add_modes_noedid);
 
+/**
+ * drm_set_preferred_mode - Sets the preferred mode of a connector
+ * @connector: connector whose mode list should be processed
+ * @hpref: horizontal resolution of preferred mode
+ * @vpref: vertical resolution of preferred mode
+ *
+ * Marks a mode as preferred if it matches the resolution specified by @hpref
+ * and @vpref.
+ */
 void drm_set_preferred_mode(struct drm_connector *connector,
 			   int hpref, int vpref)
 {
 	struct drm_display_mode *mode;
 
 	list_for_each_entry(mode, &connector->probed_modes, head) {
-		if (drm_mode_width(mode)  == hpref &&
-		    drm_mode_height(mode) == vpref)
+		if (mode->hdisplay == hpref &&
+		    mode->vdisplay == vpref)
 			mode->type |= DRM_MODE_TYPE_PREFERRED;
 	}
 }
@@ -3577,7 +3796,7 @@ EXPORT_SYMBOL(drm_set_preferred_mode);
  * @frame: HDMI AVI infoframe
  * @mode: DRM display mode
  *
- * Returns 0 on success or a negative error code on failure.
+ * Return: 0 on success or a negative error code on failure.
  */
 int
 drm_hdmi_avi_infoframe_from_display_mode(struct hdmi_avi_infoframe *frame,
@@ -3598,7 +3817,17 @@ drm_hdmi_avi_infoframe_from_display_mode(struct hdmi_avi_infoframe *frame,
 	frame->video_code = drm_match_cea_mode(mode);
 
 	frame->picture_aspect = HDMI_PICTURE_ASPECT_NONE;
+
+	if  (mode->picture_aspect_ratio == HDMI_PICTURE_ASPECT_4_3
+		|| mode->picture_aspect_ratio == HDMI_PICTURE_ASPECT_16_9) {
+		frame->picture_aspect = mode->picture_aspect_ratio;
+	} else if (frame->video_code > 0) {
+		frame->picture_aspect = drm_get_cea_aspect_ratio(
+						frame->video_code);
+	}
+
 	frame->active_aspect = HDMI_ACTIVE_ASPECT_PICTURE;
+	frame->scan_mode = HDMI_SCAN_MODE_UNDERSCAN;
 
 	return 0;
 }
@@ -3641,7 +3870,7 @@ s3d_structure_from_display_mode(const struct drm_display_mode *mode)
  * 4k or stereoscopic 3D mode. So when giving any other mode as input this
  * function will return -EINVAL, error that can be safely ignored.
  *
- * Returns 0 on success or a negative error code on failure.
+ * Return: 0 on success or a negative error code on failure.
  */
 int
 drm_hdmi_vendor_infoframe_from_display_mode(struct hdmi_vendor_infoframe *frame,

@@ -164,16 +164,17 @@ struct gpio_desc *gpio_to_desc(unsigned gpio)
 EXPORT_SYMBOL_GPL(gpio_to_desc);
 
 /**
- * Convert an offset on a certain chip to a corresponding descriptor
+ * Get the GPIO descriptor corresponding to the given hw number for this chip.
  */
-static struct gpio_desc *gpiochip_offset_to_desc(struct gpio_chip *chip,
-						 unsigned int offset)
+struct gpio_desc *gpiochip_get_desc(struct gpio_chip *chip,
+				    u16 hwnum)
 {
-	if (offset >= chip->ngpio)
+	if (hwnum >= chip->ngpio)
 		return ERR_PTR(-EINVAL);
 
-	return &chip->desc[offset];
+	return &chip->desc[hwnum];
 }
+EXPORT_SYMBOL_GPL(gpiochip_get_desc);
 
 /**
  * Convert a GPIO descriptor to the integer namespace.
@@ -1284,13 +1285,13 @@ int gpiochip_remove(struct gpio_chip *chip)
 	int		status = 0;
 	unsigned	id;
 
+	acpi_gpiochip_remove(chip);
 	gpiochip_unexport(chip);
 
 	spin_lock_irqsave(&gpio_lock, flags);
 
 	gpiochip_remove_pin_ranges(chip);
 	of_gpiochip_remove(chip);
-	acpi_gpiochip_remove(chip);
 
 	for (id = 0; id < chip->ngpio; id++) {
 		if (test_bit(FLAG_REQUESTED, &chip->desc[id].flags)) {
@@ -1475,25 +1476,13 @@ EXPORT_SYMBOL_GPL(gpiochip_remove_pin_ranges);
  * on each other, and help provide better diagnostics in debugfs.
  * They're called even less than the "set direction" calls.
  */
-static int gpiod_request(struct gpio_desc *desc, const char *label)
+static int __gpiod_request(struct gpio_desc *desc, const char *label)
 {
-	struct gpio_chip	*chip;
-	int			status = -EPROBE_DEFER;
+	struct gpio_chip	*chip = desc->chip;
+	int			status;
 	unsigned long		flags;
 
-	if (!desc) {
-		pr_warn("%s: invalid GPIO\n", __func__);
-		return -EINVAL;
-	}
-
 	spin_lock_irqsave(&gpio_lock, flags);
-
-	chip = desc->chip;
-	if (chip == NULL)
-		goto done;
-
-	if (!try_module_get(chip->owner))
-		goto done;
 
 	/* NOTE:  gpio_request() can be called in early boot,
 	 * before IRQs are enabled, for non-sleeping (SOC) GPIOs.
@@ -1504,7 +1493,6 @@ static int gpiod_request(struct gpio_desc *desc, const char *label)
 		status = 0;
 	} else {
 		status = -EBUSY;
-		module_put(chip->owner);
 		goto done;
 	}
 
@@ -1516,7 +1504,6 @@ static int gpiod_request(struct gpio_desc *desc, const char *label)
 
 		if (status < 0) {
 			desc_set_label(desc, NULL);
-			module_put(chip->owner);
 			clear_bit(FLAG_REQUESTED, &desc->flags);
 			goto done;
 		}
@@ -1528,9 +1515,34 @@ static int gpiod_request(struct gpio_desc *desc, const char *label)
 		spin_lock_irqsave(&gpio_lock, flags);
 	}
 done:
+	spin_unlock_irqrestore(&gpio_lock, flags);
+	return status;
+}
+
+static int gpiod_request(struct gpio_desc *desc, const char *label)
+{
+	int status = -EPROBE_DEFER;
+	struct gpio_chip *chip;
+
+	if (!desc) {
+		pr_warn("%s: invalid GPIO\n", __func__);
+		return -EINVAL;
+	}
+
+	chip = desc->chip;
+	if (!chip)
+		goto done;
+
+	if (try_module_get(chip->owner)) {
+		status = __gpiod_request(desc, label);
+		if (status < 0)
+			module_put(chip->owner);
+	}
+
+done:
 	if (status)
 		gpiod_dbg(desc, "%s: status %d\n", __func__, status);
-	spin_unlock_irqrestore(&gpio_lock, flags);
+
 	return status;
 }
 
@@ -1540,17 +1552,13 @@ int gpio_request(unsigned gpio, const char *label)
 }
 EXPORT_SYMBOL_GPL(gpio_request);
 
-static void gpiod_free(struct gpio_desc *desc)
+static bool __gpiod_free(struct gpio_desc *desc)
 {
+	bool			ret = false;
 	unsigned long		flags;
 	struct gpio_chip	*chip;
 
 	might_sleep();
-
-	if (!desc) {
-		WARN_ON(extra_checks);
-		return;
-	}
 
 	gpiod_unexport(desc);
 
@@ -1565,15 +1573,23 @@ static void gpiod_free(struct gpio_desc *desc)
 			spin_lock_irqsave(&gpio_lock, flags);
 		}
 		desc_set_label(desc, NULL);
-		module_put(desc->chip->owner);
 		clear_bit(FLAG_ACTIVE_LOW, &desc->flags);
 		clear_bit(FLAG_REQUESTED, &desc->flags);
 		clear_bit(FLAG_OPEN_DRAIN, &desc->flags);
 		clear_bit(FLAG_OPEN_SOURCE, &desc->flags);
-	} else
-		WARN_ON(extra_checks);
+		ret = true;
+	}
 
 	spin_unlock_irqrestore(&gpio_lock, flags);
+	return ret;
+}
+
+static void gpiod_free(struct gpio_desc *desc)
+{
+	if (desc && __gpiod_free(desc))
+		module_put(desc->chip->owner);
+	else
+		WARN_ON(extra_checks);
 }
 
 void gpio_free(unsigned gpio)
@@ -1695,6 +1711,37 @@ const char *gpiochip_is_requested(struct gpio_chip *chip, unsigned offset)
 }
 EXPORT_SYMBOL_GPL(gpiochip_is_requested);
 
+/**
+ * gpiochip_request_own_desc - Allow GPIO chip to request its own descriptor
+ * @desc: GPIO descriptor to request
+ * @label: label for the GPIO
+ *
+ * Function allows GPIO chip drivers to request and use their own GPIO
+ * descriptors via gpiolib API. Difference to gpiod_request() is that this
+ * function will not increase reference count of the GPIO chip module. This
+ * allows the GPIO chip module to be unloaded as needed (we assume that the
+ * GPIO chip driver handles freeing the GPIOs it has requested).
+ */
+int gpiochip_request_own_desc(struct gpio_desc *desc, const char *label)
+{
+	if (!desc || !desc->chip)
+		return -EINVAL;
+
+	return __gpiod_request(desc, label);
+}
+
+/**
+ * gpiochip_free_own_desc - Free GPIO requested by the chip driver
+ * @desc: GPIO descriptor to free
+ *
+ * Function frees the given GPIO requested previously with
+ * gpiochip_request_own_desc().
+ */
+void gpiochip_free_own_desc(struct gpio_desc *desc)
+{
+	if (desc)
+		__gpiod_free(desc);
+}
 
 /* Drivers MUST set GPIO direction before making get/set calls.  In
  * some cases this is done in early boot, before IRQs are enabled.
@@ -2179,7 +2226,7 @@ EXPORT_SYMBOL_GPL(gpiod_lock_as_irq);
 
 int gpio_lock_as_irq(struct gpio_chip *chip, unsigned int offset)
 {
-	return gpiod_lock_as_irq(gpiochip_offset_to_desc(chip, offset));
+	return gpiod_lock_as_irq(gpiochip_get_desc(chip, offset));
 }
 EXPORT_SYMBOL_GPL(gpio_lock_as_irq);
 
@@ -2201,7 +2248,7 @@ EXPORT_SYMBOL_GPL(gpiod_unlock_as_irq);
 
 void gpio_unlock_as_irq(struct gpio_chip *chip, unsigned int offset)
 {
-	return gpiod_unlock_as_irq(gpiochip_offset_to_desc(chip, offset));
+	return gpiod_unlock_as_irq(gpiochip_get_desc(chip, offset));
 }
 EXPORT_SYMBOL_GPL(gpio_unlock_as_irq);
 
@@ -2422,7 +2469,7 @@ static struct gpio_desc *gpiod_find(struct device *dev, const char *con_id,
 			return ERR_PTR(-EINVAL);
 		}
 
-		desc = gpiochip_offset_to_desc(chip, p->chip_hwnum);
+		desc = gpiochip_get_desc(chip, p->chip_hwnum);
 		*flags = p->flags;
 
 		return desc;

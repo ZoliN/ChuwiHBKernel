@@ -26,7 +26,6 @@ fsl_usb2_udc-$(CONFIG_ARCH_MXC)	+= fsl_mxc_udc.o
 obj-$(CONFIG_USB_M66592)	+= m66592-udc.o
 obj-$(CONFIG_USB_R8A66597)	+= r8a66597-udc.o
 obj-$(CONFIG_USB_FSL_QE)	+= fsl_qe_udc.o
-obj-$(CONFIG_USB_S3C_HSOTG)	+= s3c-hsotg.o
 obj-$(CONFIG_USB_S3C_HSUDC)	+= s3c-hsudc.o
 obj-$(CONFIG_USB_LPC32XX)	+= lpc32xx_udc.o
 obj-$(CONFIG_USB_EG20T)		+= pch_udc.o
@@ -64,6 +63,12 @@ usb_f_mass_storage-y		:= f_mass_storage.o storage_common.o
 obj-$(CONFIG_USB_F_MASS_STORAGE)+= usb_f_mass_storage.o
 usb_f_fs-y			:= f_fs.o
 obj-$(CONFIG_USB_F_FS)		+= usb_f_fs.o
+usb_f_mtp-y			:= f_mtp.o
+obj-$(CONFIG_USB_F_MTP)		+= usb_f_mtp.o
+usb_f_ptp-y			:= f_ptp.o
+obj-$(CONFIG_USB_F_PTP)		+= usb_f_ptp.o
+usb_f_midi-y			:= f_midi.o
+obj-$(CONFIG_USB_F_MIDI)	+= usb_f_midi.o
 
 #
 # USB gadget drivers
@@ -84,6 +89,7 @@ g_nokia-y			:= nokia.o
 g_webcam-y			:= webcam.o
 g_ncm-y				:= ncm.o
 g_acm_ms-y			:= acm_ms.o
+g_android-y			:= android.o
 g_tcm_usb_gadget-y		:= tcm_usb_gadget.o
 
 obj-$(CONFIG_USB_ZERO)		+= g_zero.o
@@ -103,4 +109,5 @@ obj-$(CONFIG_USB_G_NOKIA)	+= g_nokia.o
 obj-$(CONFIG_USB_G_WEBCAM)	+= g_webcam.o
 obj-$(CONFIG_USB_G_NCM)		+= g_ncm.o
 obj-$(CONFIG_USB_G_ACM_MS)	+= g_acm_ms.o
+obj-$(CONFIG_USB_G_ANDROID)	+= g_android.o
 obj-$(CONFIG_USB_GADGET_TARGET)	+= tcm_usb_gadget.o

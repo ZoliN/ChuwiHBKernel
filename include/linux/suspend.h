@@ -9,6 +9,9 @@
 #include <linux/freezer.h>
 #include <asm/errno.h>
 
+extern void (*sc_dev_state)(void *);
+extern void (*nc_dev_state)(void *);
+
 #ifdef CONFIG_VT
 extern void pm_set_vt_switch(int);
 #else
@@ -364,6 +367,7 @@ extern bool pm_get_wakeup_count(unsigned int *count, bool block);
 extern bool pm_save_wakeup_count(unsigned int count);
 extern void pm_wakep_autosleep_enabled(bool set);
 extern void pm_print_active_wakeup_sources(void);
+extern void pm_get_active_wakeup_sources(char *pending_sources, size_t max);
 
 static inline void lock_system_sleep(void)
 {
@@ -463,5 +467,18 @@ static inline void page_key_memorize(unsigned long *pfn) {}
 static inline void page_key_write(void *address) {}
 
 #endif /* !CONFIG_ARCH_SAVE_PAGE_KEYS */
+
+extern int pm_suspend_debug;
+#define	PM_SUSPEND_DBG_DEV_STATE	0x1
+#define	PM_SUSPEND_DBG_SLP_STATE	0x2
+#define	PM_SUSPEND_DBG_SUSPEND		0x4
+#define	PM_SUSPEND_DBG_RESUME		0x8
+#define	PM_SUSPEND_DBG_MISC		0x10
+extern void pm_suspend_dev_state(void);
+#define pm_suspend_dbg(flg, fmt, arg...)                                \
+do {									\
+        if (pm_suspend_debug & flg)                                     \
+                printk(KERN_INFO fmt, ##arg);				\
+} while (0)
 
 #endif /* _LINUX_SUSPEND_H */

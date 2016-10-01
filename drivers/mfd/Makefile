@@ -40,11 +40,17 @@ obj-$(CONFIG_MFD_ARIZONA_SPI)	+= arizona-spi.o
 ifneq ($(CONFIG_MFD_WM5102),n)
 obj-$(CONFIG_MFD_ARIZONA)	+= wm5102-tables.o
 endif
-ifneq ($(CONFIG_MFD_WM5110),n)
-obj-$(CONFIG_MFD_ARIZONA)	+= wm5110-tables.o
+ifneq ($(CONFIG_MFD_FLORIDA),n)
+obj-$(CONFIG_MFD_ARIZONA)	+= florida-tables.o
 endif
 ifneq ($(CONFIG_MFD_WM8997),n)
 obj-$(CONFIG_MFD_ARIZONA)	+= wm8997-tables.o
+endif
+ifneq ($(CONFIG_MFD_WM8998),n)
+obj-$(CONFIG_MFD_WM8998)	+= wm8998-tables.o
+endif
+ifneq ($(CONFIG_MFD_CS47L24),n)
+obj-$(CONFIG_MFD_ARIZONA)	+= cs47l24-tables.o
 endif
 obj-$(CONFIG_MFD_WM8400)	+= wm8400-core.o
 wm831x-objs			:= wm831x-core.o wm831x-irq.o wm831x-otp.o
@@ -166,3 +172,8 @@ obj-$(CONFIG_MFD_RETU)		+= retu-mfd.o
 obj-$(CONFIG_MFD_AS3711)	+= as3711.o
 obj-$(CONFIG_MFD_AS3722)	+= as3722.o
 obj-$(CONFIG_MFD_STW481X)	+= stw481x.o
+
+intel-soc-pmic-objs		:= intel_soc_pmic_core.o intel_soc_pmic_i2c.o
+intel-soc-pmic-objs 		+= intel_soc_pmic_crc.o intel_soc_pmic_dc.o intel_soc_pmic_dc_ti.o
+intel-soc-pmic-objs 		+= intel_soc_pmic_wc.o
+obj-$(CONFIG_INTEL_SOC_PMIC)	+= intel-soc-pmic.o

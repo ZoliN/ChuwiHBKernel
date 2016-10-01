@@ -295,6 +295,9 @@ int check_irq_vectors_for_cpu_disable(void)
 		irq = __this_cpu_read(vector_irq[vector]);
 		if (irq >= 0) {
 			desc = irq_to_desc(irq);
+			if (!desc)
+				continue;
+
 			data = irq_desc_get_irq_data(desc);
 			cpumask_copy(&affinity_new, data->affinity);
 			cpu_clear(this_cpu, affinity_new);
@@ -367,7 +370,9 @@ void fixup_irqs(void)
 
 		data = irq_desc_get_irq_data(desc);
 		affinity = data->affinity;
-		if (!irq_has_action(irq) || irqd_is_per_cpu(data) ||
+		/* include IRQs who have no action, but are chained */
+		if ((!irq_has_action(irq) && !irq_is_chained(irq)) ||
+			irqd_is_per_cpu(data) ||
 		    cpumask_subset(affinity, cpu_online_mask)) {
 			raw_spin_unlock(&desc->lock);
 			continue;
@@ -378,7 +383,13 @@ void fixup_irqs(void)
 		 * non intr-remapping case, we can't wait till this interrupt
 		 * arrives at this cpu before completing the irq move.
 		 */
-		irq_force_complete_move(irq);
+		if (irq_force_complete_move(irq)) {
+			/*
+			 * Not a valid movable interrupt skip it entirely!
+			 */
+			raw_spin_unlock(&desc->lock);
+			continue;
+		}
 
 		if (cpumask_any_and(affinity, cpu_online_mask) >= nr_cpu_ids) {
 			break_affinity = 1;

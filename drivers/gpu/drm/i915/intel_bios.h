@@ -104,7 +104,8 @@ struct vbios_data {
 #define BDB_LVDS_LFP_DATA	 42
 #define BDB_LVDS_BACKLIGHT	 43
 #define BDB_LVDS_POWER		 44
-#define BDB_MIPI		 50
+#define BDB_MIPI_CONFIG		 52
+#define BDB_MIPI_SEQUENCE	 53
 #define BDB_SKIP		254 /* VBIOS private block, ignore */
 
 struct bdb_general_features {
@@ -202,6 +203,13 @@ struct bdb_general_features {
 #define DEVICE_PORT_DVOB	0x01
 #define DEVICE_PORT_DVOC	0x02
 
+struct usb_typec_config {
+	u8  usb_typec_dongle_enabled:1;
+	u8  rsvd:7;
+	u8  dp2x_gpio_index;
+	u16 dp2x_gpio_number;
+} __packed;
+
 /* We used to keep this struct but without any version control. We should avoid
  * using it in the future, but it should be safe to keep using it in the old
  * code. */
@@ -225,6 +233,7 @@ struct old_child_dev_config {
 	u8  dvo2_wiring;
 	u16 extended_type;
 	u8  dvo_function;
+	struct usb_typec_config usb_typec;
 } __packed;
 
 /* This one contains field offsets that are known to be common for all BDB
@@ -281,6 +290,9 @@ struct bdb_general_definitions {
 	union child_device_config devices[0];
 } __packed;
 
+/* Mask for DRRS / Panel Channel / SSC / BLT control bits extraction */
+#define MODE_MASK		0x3
+
 struct bdb_lvds_options {
 	u8 panel_type;
 	u8 rsvd1;
@@ -293,6 +305,18 @@ struct bdb_lvds_options {
 	u8 lvds_edid:1;
 	u8 rsvd2:1;
 	u8 rsvd4;
+	/* LVDS Panel channel bits stored here */
+	u32 lvds_panel_channel_bits;
+	/* LVDS SSC (Spread Spectrum Clock) bits stored here. */
+	u16 ssc_bits;
+	u16 ssc_freq;
+	u16 ssc_ddt;
+	/* Panel color depth defined here */
+	u16 panel_color_depth;
+	/* LVDS panel type bits stored here */
+	u32 dps_panel_type_bits;
+	/* LVDS backlight control type bits stored here */
+	u32 blt_control_type_bits;
 } __packed;
 
 /* LFP pointer table contains entries to the struct below */
@@ -322,8 +346,6 @@ struct lvds_fp_timing {
 	u32 pp_off_reg_val;
 	u32 pp_cycle_reg;
 	u32 pp_cycle_reg_val;
-	u32 pfit_reg;
-	u32 pfit_reg_val;
 	u16 terminator;
 } __packed;
 
@@ -369,9 +391,19 @@ struct bdb_lvds_lfp_data_entry {
 	struct lvds_pnp_id pnp_id;
 } __packed;
 
+struct lfp_panel_name {
+	u8 name[13];
+	} __packed;
+
 struct bdb_lvds_lfp_data {
 	struct bdb_lvds_lfp_data_entry data[16];
+	struct lfp_panel_name name[16];
+	u16 scaling_enabling_bits;
+	u8 seamless_drrs_min_vrefresh[16];
 } __packed;
+
+#define BDB_BACKLIGHT_TYPE_NONE	0
+#define BDB_BACKLIGHT_TYPE_PWM	2
 
 struct bdb_lfp_backlight_data_entry {
 	u8 type:2;
@@ -383,10 +415,17 @@ struct bdb_lfp_backlight_data_entry {
 	u8 obsolete3;
 } __packed;
 
+
+struct bdb_lpf_backlight_brightness_data {
+	u8 controller:4;
+	u8 pin:4;
+} __packed;
+
 struct bdb_lfp_backlight_data {
 	u8 entry_size;
 	struct bdb_lfp_backlight_data_entry data[16];
 	u8 level[16];
+	struct bdb_lpf_backlight_brightness_data brightness[16];
 } __packed;
 
 struct aimdb_header {
@@ -478,6 +517,20 @@ struct bdb_driver_features {
 
 	u8 hdmi_termination;
 	u8 custom_vbt_version;
+	/* Driver features data block */
+	u16 rmpm_enabled:1;
+	u16 s2ddt_enabled:1;
+	u16 dpst_enabled:1;
+	u16 bltclt_enabled:1;
+	u16 adb_enabled:1;
+	u16 drrs_enabled:1;
+	u16 grs_enabled:1;
+	u16 gpmt_enabled:1;
+	u16 tbt_enabled:1;
+	u16 psr_enabled:1;
+	u16 ips_enabled:1;
+	u16 reserved3:4;
+	u16 pc_feature_valid:1;
 } __packed;
 
 #define EDP_18BPP	0
@@ -548,62 +601,62 @@ int intel_parse_bios(struct drm_device *dev);
 #define GR18_SMM_EN		(1<<0)
 
 /* Set by driver, cleared by VBIOS */
-#define SWF00_YRES_SHIFT	16
-#define SWF00_XRES_SHIFT	0
-#define SWF00_RES_MASK		0xffff
+#define SWF10_YRES_SHIFT	16
+#define SWF10_XRES_SHIFT	0
+#define SWF10_RES_MASK		0xffff
 
 /* Set by VBIOS at boot time and driver at runtime */
-#define SWF01_TV2_FORMAT_SHIFT	8
-#define SWF01_TV1_FORMAT_SHIFT	0
-#define SWF01_TV_FORMAT_MASK	0xffff
+#define SWF11_TV2_FORMAT_SHIFT	8
+#define SWF11_TV1_FORMAT_SHIFT	0
+#define SWF11_TV_FORMAT_MASK	0xffff
 
-#define SWF10_VBIOS_BLC_I2C_EN	(1<<29)
-#define SWF10_GTT_OVERRIDE_EN	(1<<28)
-#define SWF10_LFP_DPMS_OVR	(1<<27) /* override DPMS on display switch */
-#define SWF10_ACTIVE_TOGGLE_LIST_MASK (7<<24)
-#define   SWF10_OLD_TOGGLE	0x0
-#define   SWF10_TOGGLE_LIST_1	0x1
-#define   SWF10_TOGGLE_LIST_2	0x2
-#define   SWF10_TOGGLE_LIST_3	0x3
-#define   SWF10_TOGGLE_LIST_4	0x4
-#define SWF10_PANNING_EN	(1<<23)
-#define SWF10_DRIVER_LOADED	(1<<22)
-#define SWF10_EXTENDED_DESKTOP	(1<<21)
-#define SWF10_EXCLUSIVE_MODE	(1<<20)
-#define SWF10_OVERLAY_EN	(1<<19)
-#define SWF10_PLANEB_HOLDOFF	(1<<18)
-#define SWF10_PLANEA_HOLDOFF	(1<<17)
-#define SWF10_VGA_HOLDOFF	(1<<16)
-#define SWF10_ACTIVE_DISP_MASK	0xffff
-#define   SWF10_PIPEB_LFP2	(1<<15)
-#define   SWF10_PIPEB_EFP2	(1<<14)
-#define   SWF10_PIPEB_TV2	(1<<13)
-#define   SWF10_PIPEB_CRT2	(1<<12)
-#define   SWF10_PIPEB_LFP	(1<<11)
-#define   SWF10_PIPEB_EFP	(1<<10)
-#define   SWF10_PIPEB_TV	(1<<9)
-#define   SWF10_PIPEB_CRT	(1<<8)
-#define   SWF10_PIPEA_LFP2	(1<<7)
-#define   SWF10_PIPEA_EFP2	(1<<6)
-#define   SWF10_PIPEA_TV2	(1<<5)
-#define   SWF10_PIPEA_CRT2	(1<<4)
-#define   SWF10_PIPEA_LFP	(1<<3)
-#define   SWF10_PIPEA_EFP	(1<<2)
-#define   SWF10_PIPEA_TV	(1<<1)
-#define   SWF10_PIPEA_CRT	(1<<0)
+#define SWF00_VBIOS_BLC_I2C_EN	(1<<29)
+#define SWF00_GTT_OVERRIDE_EN	(1<<28)
+#define SWF00_LFP_DPMS_OVR	(1<<27) /* override DPMS on display switch */
+#define SWF00_ACTIVE_TOGGLE_LIST_MASK (7<<24)
+#define   SWF00_OLD_TOGGLE	0x0
+#define   SWF00_TOGGLE_LIST_1	0x1
+#define   SWF00_TOGGLE_LIST_2	0x2
+#define   SWF00_TOGGLE_LIST_3	0x3
+#define   SWF00_TOGGLE_LIST_4	0x4
+#define SWF00_PANNING_EN	(1<<23)
+#define SWF00_DRIVER_LOADED	(1<<22)
+#define SWF00_EXTENDED_DESKTOP	(1<<21)
+#define SWF00_EXCLUSIVE_MODE	(1<<20)
+#define SWF00_OVERLAY_EN	(1<<19)
+#define SWF00_PLANEB_HOLDOFF	(1<<18)
+#define SWF00_PLANEA_HOLDOFF	(1<<17)
+#define SWF00_VGA_HOLDOFF	(1<<16)
+#define SWF00_ACTIVE_DISP_MASK	0xffff
+#define   SWF00_PIPEB_LFP2	(1<<15)
+#define   SWF00_PIPEB_EFP2	(1<<14)
+#define   SWF00_PIPEB_TV2	(1<<13)
+#define   SWF00_PIPEB_CRT2	(1<<12)
+#define   SWF00_PIPEB_LFP	(1<<11)
+#define   SWF00_PIPEB_EFP	(1<<10)
+#define   SWF00_PIPEB_TV	(1<<9)
+#define   SWF00_PIPEB_CRT	(1<<8)
+#define   SWF00_PIPEA_LFP2	(1<<7)
+#define   SWF00_PIPEA_EFP2	(1<<6)
+#define   SWF00_PIPEA_TV2	(1<<5)
+#define   SWF00_PIPEA_CRT2	(1<<4)
+#define   SWF00_PIPEA_LFP	(1<<3)
+#define   SWF00_PIPEA_EFP	(1<<2)
+#define   SWF00_PIPEA_TV	(1<<1)
+#define   SWF00_PIPEA_CRT	(1<<0)
 
-#define SWF11_MEMORY_SIZE_SHIFT	16
-#define SWF11_SV_TEST_EN	(1<<15)
-#define SWF11_IS_AGP		(1<<14)
-#define SWF11_DISPLAY_HOLDOFF	(1<<13)
-#define SWF11_DPMS_REDUCED	(1<<12)
-#define SWF11_IS_VBE_MODE	(1<<11)
-#define SWF11_PIPEB_ACCESS	(1<<10) /* 0 here means pipe a */
-#define SWF11_DPMS_MASK		0x07
-#define   SWF11_DPMS_OFF	(1<<2)
-#define   SWF11_DPMS_SUSPEND	(1<<1)
-#define   SWF11_DPMS_STANDBY	(1<<0)
-#define   SWF11_DPMS_ON		0
+#define SWF01_MEMORY_SIZE_SHIFT	16
+#define SWF01_SV_TEST_EN	(1<<15)
+#define SWF01_IS_AGP		(1<<14)
+#define SWF01_DISPLAY_HOLDOFF	(1<<13)
+#define SWF01_DPMS_REDUCED	(1<<12)
+#define SWF01_IS_VBE_MODE	(1<<11)
+#define SWF01_PIPEB_ACCESS	(1<<10) /* 0 here means pipe a */
+#define SWF01_DPMS_MASK		0x07
+#define   SWF01_DPMS_OFF	(1<<2)
+#define   SWF01_DPMS_SUSPEND	(1<<1)
+#define   SWF01_DPMS_STANDBY	(1<<0)
+#define   SWF01_DPMS_ON		0
 
 #define SWF14_GFX_PFIT_EN	(1<<31)
 #define SWF14_TEXT_PFIT_EN	(1<<30)
@@ -653,6 +706,8 @@ int intel_parse_bios(struct drm_device *dev);
 #define	 DEVICE_TYPE_HDMI	0x60D2
 #define	 DEVICE_TYPE_DP		0x68C6
 #define	 DEVICE_TYPE_eDP	0x78C6
+#define	 DEVICE_TYPE_DP_HDMI_DVI	0x60D6
+#define	 DEVICE_TYPE_MIPI	0x7CC2
 
 #define  DEVICE_TYPE_CLASS_EXTENSION	(1 << 15)
 #define  DEVICE_TYPE_POWER_MANAGEMENT	(1 << 14)
@@ -710,45 +765,206 @@ int intel_parse_bios(struct drm_device *dev);
 #define DVO_PORT_DPC	8
 #define DVO_PORT_DPD	9
 #define DVO_PORT_DPA	10
+#define DVO_PORT_MIPIA	21
+#define DVO_PORT_MIPIB	22
+#define DVO_PORT_MIPIC	23
+#define DVO_PORT_MIPID	24
 
-/* MIPI DSI panel info */
-struct bdb_mipi {
+/* Block 52 contains MIPI Panel info
+ * 6 such enteries will there. Index into correct
+ * entery is based on the panel_index in #40 LFP
+ */
+#define MAX_MIPI_CONFIGURATIONS	6
+
+#define MIPI_DSI_UNDEFINED_PANEL_ID	0
+#define MIPI_DSI_GENERIC_PANEL_ID	1
+
+struct mipi_config {
 	u16 panel_id;
-	u16 bridge_revision;
 
-	/* General params */
-	u32 dithering:1;
-	u32 bpp_pixel_format:1;
+	/* General Params */
+	u32 enable_dithering:1;
 	u32 rsvd1:1;
-	u32 dphy_valid:1;
-	u32 resvd2:28;
+	u32 is_bridge:1;
 
-	u16 port_info;
-	u16 rsvd3:2;
-	u16 num_lanes:2;
-	u16 rsvd4:12;
+	u32 panel_arch_type:2;
+	u32 is_cmd_mode:1;
 
-	/* DSI config */
-	u16 virt_ch_num:2;
-	u16 vtm:2;
-	u16 rsvd5:12;
+#define NON_BURST_SYNC_PULSE	0x1
+#define NON_BURST_SYNC_EVENTS	0x2
+#define BURST_MODE		0x3
+	u32 video_transfer_mode:2;
 
-	u32 dsi_clock;
+	u32 cabc_supported:1;
+	u32 pmic_soc_blc:1;
+
+	/* Bit 13:10 */
+#define PIXEL_FORMAT_RGB565			0x1
+#define PIXEL_FORMAT_RGB666			0x2
+#define PIXEL_FORMAT_RGB666_LOOSELY_PACKED	0x3
+#define PIXEL_FORMAT_RGB888			0x4
+	u32 videomode_color_format:4;
+
+	/* Bit 15:14 */
+#define ENABLE_ROTATION_0	0x0
+#define ENABLE_ROTATION_90	0x1
+#define ENABLE_ROTATION_180	0x2
+#define ENABLE_ROTATION_270	0x3
+	u32 rotation:2;
+	u32 bta_enabled:1;
+	u32 rsvd2:15;
+
+	/* 2 byte Port Description */
+#define DUAL_LINK_NOT_SUPPORTED	0
+#define DUAL_LINK_FRONT_BACK	1
+#define DUAL_LINK_PIXEL_ALT	2
+	u16 dual_link:2;
+	u16 lane_cnt:2;
+	u16 pixel_overlap:3;
+	u16 rsvd3:9;
+
+	u16 rsvd4;
+
+	u8 rsvd5;
+	u32 target_burst_mode_freq;
+	u32 dsi_ddr_clk;
 	u32 bridge_ref_clk;
-	u16 rsvd_pwr;
 
-	/* Dphy Params */
-	u32 prepare_cnt:5;
-	u32 rsvd6:3;
+#define  BYTE_CLK_SEL_20MHZ		0
+#define  BYTE_CLK_SEL_10MHZ		1
+#define  BYTE_CLK_SEL_5MHZ		2
+	u8 byte_clk_sel:2;
+
+	u8 rsvd6:6;
+
+	/* DPHY Flags */
+	u16 dphy_param_valid:1;
+	u16 eot_pkt_disabled:1;
+	u16 enable_clk_stop:1;
+	u16 rsvd7:13;
+
+	u32 hs_tx_timeout;
+	u32 lp_rx_timeout;
+	u32 turn_around_timeout;
+	u32 device_reset_timer;
+	u32 master_init_timer;
+	u32 dbi_bw_timer;
+	u32 lp_byte_clk_val;
+
+	/*  4 byte Dphy Params */
+	u32 prepare_cnt:6;
+	u32 rsvd8:2;
 	u32 clk_zero_cnt:8;
 	u32 trail_cnt:5;
-	u32 rsvd7:3;
+	u32 rsvd9:3;
 	u32 exit_zero_cnt:6;
-	u32 rsvd8:2;
+	u32 rsvd10:2;
 
-	u32 hl_switch_cnt;
-	u32 lp_byte_clk;
 	u32 clk_lane_switch_cnt;
+	u32 hl_switch_cnt;
+
+	u32 rsvd11[6];
+
+	/* timings based on dphy spec */
+	u8 tclk_miss;
+	u8 tclk_post;
+	u8 rsvd12;
+	u8 tclk_pre;
+	u8 tclk_prepare;
+	u8 tclk_settle;
+	u8 tclk_term_enable;
+	u8 tclk_trail;
+	u16 tclk_prepare_clkzero;
+	u8 rsvd13;
+	u8 td_term_enable;
+	u8 teot;
+	u8 ths_exit;
+	u8 ths_prepare;
+	u16 ths_prepare_hszero;
+	u8 rsvd14;
+	u8 ths_settle;
+	u8 ths_skip;
+	u8 ths_trail;
+	u8 tinit;
+	u8 tlpx;
+	u8 rsvd15[3];
+
+	/* GPIOs */
+	u8 panel_enable;
+	u8 bl_enable;
+	u8 pwm_enable;
+	u8 reset_r_n;
+	u8 pwr_down_r;
+	u8 stdby_r_n;
+
 } __packed;
+
+/* Block 52 contains MIPI configuration block
+ * 6 * bdb_mipi_config, followed by 6 pps data
+ * block below
+ *
+ * all delays has a unit of 100us
+ */
+struct mipi_pps_data {
+	u16 panel_on_delay;
+	u16 bl_enable_delay;
+	u16 bl_disable_delay;
+	u16 panel_off_delay;
+	u16 panel_power_cycle_delay;
+};
+
+struct bdb_mipi_config {
+	struct mipi_config config[MAX_MIPI_CONFIGURATIONS];
+	struct mipi_pps_data pps[MAX_MIPI_CONFIGURATIONS];
+};
+
+/* Block 53 contains MIPI sequences as needed by the panel
+ * for enabling it. This block can be variable in size and
+ * can be maximum of 6 blocks
+ */
+struct bdb_mipi_sequence {
+	u8 version;
+	u8 data[0];
+};
+
+/* MIPI Sequnece Block definitions */
+enum mipi_seq {
+	MIPI_SEQ_UNDEFINED = 0,
+	MIPI_SEQ_ASSERT_RESET,
+	MIPI_SEQ_INIT_OTP,
+	MIPI_SEQ_DISPLAY_ON,
+	MIPI_SEQ_DISPLAY_OFF,
+	MIPI_SEQ_DEASSERT_RESET,
+	MIPI_SEQ_BACKLIGHT_ON,
+	MIPI_SEQ_BACKLIGHT_OFF,
+	MIPI_SEQ_TEAR_ON,
+	MIPI_SEQ_TEAR_OFF,
+	MIPI_POWER_ON,
+	MIPI_POWER_OFF,
+	MIPI_SEQ_MAX
+};
+
+enum mipi_seq_element {
+	MIPI_SEQ_ELEM_UNDEFINED = 0,
+	MIPI_SEQ_ELEM_SEND_PKT,
+	MIPI_SEQ_ELEM_DELAY,
+	MIPI_SEQ_ELEM_GPIO,
+	MIPI_SEQ_ELEM_I2C,
+	MIPI_SEQ_ELEM_SPI,
+	MIPI_SEQ_ELEM_PMIC,
+	MIPI_SEQ_ELEM_STATUS,
+	MIPI_SEQ_ELEM_MAX
+};
+
+enum mipi_gpio_pin_index {
+	MIPI_GPIO_UNDEFINED = 0,
+	MIPI_GPIO_PANEL_ENABLE,
+	MIPI_GPIO_BL_ENABLE,
+	MIPI_GPIO_PWM_ENABLE,
+	MIPI_GPIO_RESET_N,
+	MIPI_GPIO_PWR_DOWN_R,
+	MIPI_GPIO_STDBY_RST_N,
+	MIPI_GPIO_MAX
+};
 
 #endif /* _I830_BIOS_H_ */

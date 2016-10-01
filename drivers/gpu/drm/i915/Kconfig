@@ -5,16 +5,17 @@ config DRM_I915
 	depends on (AGP || AGP=n)
 	select INTEL_GTT
 	select AGP_INTEL if AGP
+	select INTERVAL_TREE
 	# we need shmfs for the swappable backing store, and in particular
 	# the shmem_readpage() which depends upon tmpfs
 	select SHMEM
 	select TMPFS
+	select STOP_MACHINE
 	select DRM_KMS_HELPER
 	# i915 depends on ACPI_VIDEO when ACPI is enabled
 	# but for select to work, need to select ACPI_VIDEO's dependencies, ick
 	select BACKLIGHT_LCD_SUPPORT if ACPI
 	select BACKLIGHT_CLASS_DEVICE if ACPI
-	select VIDEO_OUTPUT_CONTROL if ACPI
 	select INPUT if ACPI
 	select ACPI_VIDEO if ACPI
 	select ACPI_BUTTON if ACPI
@@ -72,7 +73,7 @@ config DRM_I915_PRELIMINARY_HW_SUPPORT
 
 config DRM_I915_UMS
 	bool "Enable userspace modesetting on Intel hardware (DEPRECATED)"
-	depends on DRM_I915
+	depends on DRM_I915 && BROKEN
 	default n
 	help
 	  Choose this option if you still need userspace modesetting.
@@ -81,3 +82,26 @@ config DRM_I915_UMS
 	  enable this only if you have ancient versions of the DDX drivers.
 
 	  If in doubt, say "N".
+
+config DRM_I915_SYNC
+	bool "Enable Native sync support"
+	depends on DRM_I915 && SYNC
+	default y
+	help
+	  Choose this option if you require Native sync support within the i915
+	  driver;
+
+	  i915 driver implements a synchronization timeline and users can
+	  request a fence when they submit work to the GPU. A fence is a
+	  collection of synchronization points and it will be signalled when
+	  the work is completed. Since GPU Scheduler is not yet available this
+	  requires userspace support to actually make use of this functionality.
+
+	  If in doubt, say "Y".
+
+config SUPPORT_LPDMA_HDMI_AUDIO
+	bool "Enable LP DMA HDMI audio"
+	depends on DRM_I915
+	default y
+	help
+	Choose this option for enabling HDMI audio.

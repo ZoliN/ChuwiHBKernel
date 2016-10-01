@@ -67,6 +67,8 @@ MODULE_LICENSE("GPL");
 #define MT_QUIRK_IGNORE_DUPLICATES	(1 << 10)
 #define MT_QUIRK_HOVERING		(1 << 11)
 #define MT_QUIRK_CONTACT_CNT_ACCURATE	(1 << 12)
+#define MT_INPUTMODE_TOUCHSCREEN	0x02
+#define MT_INPUTMODE_TOUCHPAD		0x03
 
 struct mt_slot {
 	__s32 x, y, cx, cy, p, w, h;
@@ -105,6 +107,7 @@ struct mt_device {
 	__s16 inputmode_index;	/* InputMode HID feature index in the report */
 	__s16 maxcontact_report_id;	/* Maximum Contact Number HID feature,
 				   -1 if non-existent */
+	__u8 inputmode_value;  /* InputMode HID feature value */
 	__u8 num_received;	/* how many contacts we received */
 	__u8 num_expected;	/* expected last contact index */
 	__u8 maxcontacts;
@@ -415,8 +418,20 @@ static int mt_touch_input_mapping(struct hid_device *hdev, struct hid_input *hi,
 	 * Model touchscreens providing buttons as touchpads.
 	 */
 	if (field->application == HID_DG_TOUCHPAD ||
-	    (usage->hid & HID_USAGE_PAGE) == HID_UP_BUTTON)
+	    (usage->hid & HID_USAGE_PAGE) == HID_UP_BUTTON) {
 		td->mt_flags |= INPUT_MT_POINTER;
+		td->inputmode_value = MT_INPUTMODE_TOUCHPAD;
+	}
+
+	/* Only map fields from TouchScreen or TouchPad collections.
+         * We need to ignore fields that belong to other collections
+         * such as Mouse that might have the same GenericDesktop usages. */
+	if (field->application == HID_DG_TOUCHSCREEN)
+		set_bit(INPUT_PROP_DIRECT, hi->input->propbit);
+	else if (field->application == HID_DG_TOUCHPAD)
+		set_bit(INPUT_PROP_POINTER, hi->input->propbit);
+	else
+		return 0;
 
 	if (usage->usage_index)
 		prev_usage = &field->usage[usage->usage_index - 1];
@@ -747,12 +762,13 @@ static void mt_touch_report(struct hid_device *hid, struct hid_report *report)
 		mt_sync_frame(td, report->field[0]->hidinput->input);
 }
 
-static void mt_touch_input_configured(struct hid_device *hdev,
+static int mt_touch_input_configured(struct hid_device *hdev,
 					struct hid_input *hi)
 {
 	struct mt_device *td = hid_get_drvdata(hdev);
 	struct mt_class *cls = &td->mtclass;
 	struct input_dev *input = hi->input;
+	int ret;
 
 	if (!td->maxcontacts)
 		td->maxcontacts = MT_DEFAULT_MAXCONTACT;
@@ -767,9 +783,12 @@ static void mt_touch_input_configured(struct hid_device *hdev,
 	if (cls->quirks & MT_QUIRK_NOT_SEEN_MEANS_UP)
 		td->mt_flags |= INPUT_MT_DROP_UNUSED;
 
-	input_mt_init_slots(input, td->maxcontacts, td->mt_flags);
+	ret = input_mt_init_slots(input, td->maxcontacts, td->mt_flags);
+	if (ret)
+		return ret;
 
 	td->mt_flags = 0;
+	return 0;
 }
 
 static int mt_input_mapping(struct hid_device *hdev, struct hid_input *hi,
@@ -841,7 +860,7 @@ static void mt_set_input_mode(struct hid_device *hdev)
 	re = &(hdev->report_enum[HID_FEATURE_REPORT]);
 	r = re->report_id_hash[td->inputmode];
 	if (r) {
-		r->field[0]->value[td->inputmode_index] = 0x02;
+		r->field[0]->value[td->inputmode_index] = td->inputmode_value;
 		hid_hw_request(hdev, r, HID_REQ_SET_REPORT);
 	}
 }
@@ -902,14 +921,15 @@ static void mt_post_parse(struct mt_device *td)
 		cls->quirks &= ~MT_QUIRK_CONTACT_CNT_ACCURATE;
 }
 
-static void mt_input_configured(struct hid_device *hdev, struct hid_input *hi)
+static int mt_input_configured(struct hid_device *hdev, struct hid_input *hi)
 {
 	struct mt_device *td = hid_get_drvdata(hdev);
 	char *name;
 	const char *suffix = NULL;
+	int ret = 0;
 
 	if (hi->report->id == td->mt_report_id)
-		mt_touch_input_configured(hdev, hi);
+		ret = mt_touch_input_configured(hdev, hi);
 
 	if (hi->report->field[0]->physical == HID_DG_STYLUS) {
 		suffix = "Pen";
@@ -925,6 +945,7 @@ static void mt_input_configured(struct hid_device *hdev, struct hid_input *hi)
 			hi->input->name = name;
 		}
 	}
+	return ret;
 }
 
 static int mt_probe(struct hid_device *hdev, const struct hid_device_id *id)
@@ -973,6 +994,7 @@ static int mt_probe(struct hid_device *hdev, const struct hid_device_id *id)
 	td->mtclass = *mtclass;
 	td->inputmode = -1;
 	td->maxcontact_report_id = -1;
+	td->inputmode_value = MT_INPUTMODE_TOUCHSCREEN;
 	td->cc_index = -1;
 	td->mt_report_id = -1;
 	td->pen_report_id = -1;
