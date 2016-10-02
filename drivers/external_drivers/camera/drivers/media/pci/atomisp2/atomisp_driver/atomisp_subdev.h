@@ -110,14 +110,6 @@ struct atomisp_video_pipe {
 	 */
 	unsigned int frame_request_config_id[VIDEO_MAX_FRAME];
 	struct atomisp_css_params_with_list *frame_params[VIDEO_MAX_FRAME];
-
-	/*
-	* move wdt from asd struct to create wdt for each pipe
-	*/
-	struct timer_list wdt;
-	unsigned int wdt_duration;	/* in jiffies */
-	unsigned long wdt_expires;
-	atomic_t wdt_count;
 };
 
 struct atomisp_acc_pipe {
@@ -188,17 +180,6 @@ struct atomisp_css_params {
 	struct ia_css_dvs2_coefficients *dvs2_coeff;
 	struct ia_css_shading_table *shading_table;
 	struct ia_css_morph_table   *morph_table;
-
-	/*Add new parameters for isp2.7*/
-	struct ia_css_dpc2_config dpc2_config;
-	struct ia_css_eed1_8_config eed1_8_config;
-	struct ia_css_ob2_config ob2_config;
-	struct ia_css_ctc2_config ctc2_config;
-	struct ia_css_iefd2_6_config iefd2_6_config;
-	struct ia_css_macc1_5_config macc1_5_config;
-	struct ia_css_macc1_5_table macc1_5_table;
-	struct ia_css_xnr3_0_11_config xnr3_0_11_config;
-
 
 	/*
 	 * Used to store the user pointer address of the frame. driver needs to
@@ -327,11 +308,8 @@ struct atomisp_sub_device {
 	struct v4l2_ctrl *continuous_raw_buffer_size;
 	struct v4l2_ctrl *continuous_viewfinder;
 	struct v4l2_ctrl *enable_raw_buffer_lock;
-	struct v4l2_ctrl *ion_dev_fd;
 	struct v4l2_ctrl *disable_dz;
-#ifdef V4L2_CID_ATOMISP_SELECT_ISP_VERSION
-	struct v4l2_ctrl *select_isp_version;
-#endif
+
 	struct {
 		struct list_head fw;
 		struct list_head memory_maps;
@@ -409,10 +387,14 @@ struct atomisp_sub_device {
 	int raw_buffer_locked_count;
 	spinlock_t raw_buffer_bitmap_lock;
 
+	struct timer_list wdt;
+	unsigned int wdt_duration;	/* in jiffies */
+	unsigned long wdt_expires;
+
 	struct atomisp_resolution sensor_array_res;
 	bool high_speed_mode; /* Indicate whether now is a high speed mode */
 	int pending_capture_request; /* Indicates the number of pending capture requests. */
-	bool re_trigger_capture;
+
 	unsigned int preview_exp_id;
 	unsigned int postview_exp_id;
 };

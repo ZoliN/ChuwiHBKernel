@@ -65,10 +65,6 @@
 #define ATOMISP_INTERNAL_PM	(IS_MOFD || IS_BYT || IS_CHT)
 #endif
 
-static uint skip_fwload = 0;
-module_param(skip_fwload, uint, 0644);
-MODULE_PARM_DESC(skip_fwload, "Skip atomisp firmware load for COS");
-
 /* set reserved memory pool size in page */
 unsigned int repool_pgnr;
 module_param(repool_pgnr, uint, 0644);
@@ -1157,9 +1153,6 @@ atomisp_load_firmware(struct atomisp_device *isp)
 	int rc;
 	char *fw_path = NULL;
 
-	if (skip_fwload)
-		return NULL;
-
 #if defined(ATOMISP_FWNAME)
 	fw_path = ATOMISP_FWNAME;
 #else
@@ -1239,15 +1232,7 @@ static int init_atomisp_wdts(struct atomisp_device *isp)
 	for (i = 0; i < isp->num_of_streams; i++) {
 		struct atomisp_sub_device *asd = &isp->asd[i];
 		asd = &isp->asd[i];
-		setup_timer(&asd->video_out_capture.wdt,
-			atomisp_wdt, (unsigned long)&asd->video_out_capture);
-		setup_timer(&asd->video_out_preview.wdt,
-			atomisp_wdt, (unsigned long)&asd->video_out_preview);
-		setup_timer(&asd->video_out_vf.wdt,
-			atomisp_wdt, (unsigned long)&asd->video_out_vf);
-		setup_timer(&asd->video_out_video_capture.wdt,
-			atomisp_wdt,
-			(unsigned long)&asd->video_out_video_capture);
+		setup_timer(&asd->wdt, atomisp_wdt, (unsigned long)isp);
 	}
 	return 0;
 alloc_fail:
@@ -1264,7 +1249,6 @@ static int atomisp_pci_probe(struct pci_dev *dev,
 	const struct atomisp_platform_data *pdata;
 	struct atomisp_device *isp;
 	unsigned int start;
-	void __iomem * const *table;
 	void __iomem *base;
 	int err, val;
 	u32 irq;
@@ -1300,13 +1284,7 @@ static int atomisp_pci_probe(struct pci_dev *dev,
 		return err;
 	}
 
-	table = pcim_iomap_table(dev);
-	if (!table) {
-		dev_err(&dev->dev, "atomisp: error iomap table ptr\n");
-		return -EINVAL;
-	}
-	base = table[ATOM_ISP_PCI_BAR];
-
+	base = pcim_iomap_table(dev)[ATOM_ISP_PCI_BAR];
 	dev_dbg(&dev->dev, "base: %p\n", base);
 
 	atomisp_io_base = base;
@@ -1608,12 +1586,10 @@ load_fw_fail:
 	atomisp_msi_irq_uninit(isp, dev);
 
 	atomisp_ospm_dphy_down(isp);
-#ifdef CONFIG_GMIN_INTEL_MID
 	if (ATOMISP_INTERNAL_PM) {
 		if (atomisp_mrfld_power_down(isp))
 			dev_err(&dev->dev, "Failed to switch off ISP\n");
 	}
-#endif
 
 	pci_dev_put(isp->pci_root);
 	return err;
