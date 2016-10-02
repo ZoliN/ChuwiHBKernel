@@ -69,3 +69,4 @@ obj-$(CONFIG_ANDROID_NFC_PN544)		+= pn544/
 obj-$(CONFIG_MDM_CTRL)		+= modem_control/
 obj-$(CONFIG_ANDROID_NFC_FDP)	+= fdp/
 obj-$(CONFIG_BMA250) += bma250/
+obj-$(CONFIG_RTL8723BS) += rtl8723/

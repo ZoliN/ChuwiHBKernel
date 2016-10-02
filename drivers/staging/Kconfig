@@ -153,4 +153,6 @@ source "drivers/staging/modem_control/Kconfig"
 source "drivers/staging/fdp/Kconfig"
 
 source "drivers/staging/bma250/Kconfig"
+
+source "drivers/staging/rtl8723/Kconfig"
 endif # STAGING
