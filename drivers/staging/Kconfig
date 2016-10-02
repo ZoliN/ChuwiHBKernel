@@ -151,4 +151,6 @@ source "drivers/staging/pn544/Kconfig"
 source "drivers/staging/modem_control/Kconfig"
 
 source "drivers/staging/fdp/Kconfig"
+
+source "drivers/staging/bma250/Kconfig"
 endif # STAGING

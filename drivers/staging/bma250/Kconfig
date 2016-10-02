@@ -1,0 +1,8 @@
+config BMA250
+        tristate "Bosch BMA250 3-Axis Accelerometer Driver"
+        depends on I2C
+        help
+         Say Y here if you have a Bosch BMA150, BMA250 or BMA250E 3-Axis Accelerometer.
+
+         To compile this driver as a module, choose M here.  This module
+         will be called to 'bma250'.
