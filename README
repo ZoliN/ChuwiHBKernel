@@ -1,3 +1,16 @@
+This is a custom android kernel for Chuwi Hibook. It is based on Intel's sources posted at github.com/01org/ProductionKernelQuilts.
+To get touch working copy fw/mssl017.fw to /system/etc/firmware before boot.
+
+Working list:
+-touch,audio,accelerometer,light sensor,video,wifi,usb, battery indicator
+
+Not-working list:
+-cameras: no source for unicam ov5648 (back camera)
+-bluetooth: works for a moment then crashes. If I turn it on while music is playing it connects and streams music to speaker ok, but when music stops connection breaks. 
+-battery charger params need adjustment as tablet only charges to about 80 percent.
+
+Test build can be found in build/.
+
         Linux kernel release 3.x <http://kernel.org/>
 
 These are the release notes for Linux version 3.  Read them carefully,
